@@ -78,6 +78,17 @@ const knownWorkspaces = [
   { id: 'workspace-known-4', path: 'D:/b/tools', title: 'tools 备用' },
 ]
 
+/** Agent presets the fake roster lists, in registry order. */
+const knownPresets = [
+  { id: 'coder', name: '写代码助手', description: '为编码任务调整工具与提示' },
+  { id: 'reviewer', name: '代码审阅', description: '偏重审阅与检查' },
+  { id: 'writer', name: '写作', description: '面向文档写作' },
+  { id: 'broken-preset', name: '坏预设', description: '注册后激活失败', broken: 'missing plugin: nope' },
+]
+
+/** Fake Agent preset registry; undefined simulates a deployment without a roster. */
+let presetsService = { defaultId: 'coder', list: async () => knownPresets }
+
 function liveAgent(id) {
   return {
     session: { id },
@@ -132,6 +143,9 @@ const ctx = {
           renamed.push({ id: session.id, title })
         },
       }
+    }
+    if (service === 'agentPresets') {
+      return presetsService
     }
     return undefined
   },
@@ -192,11 +206,13 @@ apply(ctx)
 
 const list = tools.get('session_list')
 const models = tools.get('session_models')
+const presets = tools.get('session_presets')
 const send = tools.get('session_send')
 const create = tools.get('session_create')
 const read = tools.get('session_read')
 assert.ok(list, 'session_list registered')
 assert.ok(models, 'session_models registered')
+assert.ok(presets, 'session_presets registered')
 assert.ok(send, 'session_send registered')
 assert.ok(create, 'session_create registered')
 assert.ok(read, 'session_read registered')
@@ -494,6 +510,78 @@ liveAgents.set('session-new-13', liveAgent('session-new-13'))
 const recommended = await create.execute({ message: '开工', provider: 'remote-magpie/zhipu', model: 'glm-5.3' }, exec('call-create-recommended-effort'))
 assert.equal(recommended.model, 'remote-magpie/zhipu/glm-5.3 @ medium')
 assert.equal(selections.at(-1).selection.reasoningEffort, 'medium')
+
+// presets: flattens the roster with the default mark and the activation failure
+const roster = await presets.execute({}, exec('call-presets'))
+assert.equal(roster.total, 4)
+assert.deepEqual(roster.presets[0], {
+  id: 'coder',
+  name: '写代码助手',
+  description: '为编码任务调整工具与提示',
+  isDefault: true,
+})
+const brokenPreset = roster.presets.find(row => row.id === 'broken-preset')
+assert.equal(brokenPreset.broken, 'missing plugin: nope')
+assert.equal(brokenPreset.isDefault, undefined)
+
+// create: an exact preset id passes through and is echoed back
+const coded = await create.execute({ message: '开工', agentPreset: 'reviewer' }, exec('call-create-preset-id'))
+assert.equal(coded.preset, 'reviewer')
+assert.deepEqual(created.at(-1), { agentPreset: 'reviewer' })
+
+// create: a spoken preset name resolves through the roster display names
+const spokenPreset = await create.execute({ message: '开工', agentPreset: '写代码 助手' }, exec('call-create-preset-name'))
+assert.equal(spokenPreset.preset, 'coder')
+assert.equal(created.at(-1).agentPreset, 'coder')
+
+// create: a partially spoken preset name resolves when it is unique
+const partialPreset = await create.execute({ message: '开工', agentPreset: '代码审' }, exec('call-create-preset-partial'))
+assert.equal(partialPreset.preset, 'reviewer')
+
+// create: an ambiguous preset name lists candidates instead of guessing
+await assert.rejects(
+  create.execute({ message: '开工', agentPreset: '代码' }, exec('call-create-preset-ambiguous')),
+  /agent preset "代码" matches 2 presets: coder \(写代码助手\), reviewer \(代码审阅\)\. Call session_create again with one preset id\./,
+)
+
+// create: an unknown preset fails with the roster attached and costs nothing
+const createdBeforePresets = created.length
+await assert.rejects(
+  create.execute({ message: '开工', agentPreset: '翻译' }, exec('call-create-preset-missing')),
+  /agent preset "翻译" is not in the preset roster\. Default: coder\. Available: id=coder name=写代码助手 \(default\); id=reviewer name=代码审阅; id=writer name=写作; id=broken-preset name=坏预设 \(broken\)\. Call session_create again with an exact preset id; session_presets lists this roster with descriptions\./,
+)
+assert.equal(created.length, createdBeforePresets)
+
+// create: a preset id that exists but is broken reports why it cannot run
+await assert.rejects(
+  create.execute({ message: '开工', agentPreset: 'broken-preset' }, exec('call-create-preset-broken')),
+  /agent preset "broken-preset" is currently unavailable: missing plugin: nope/,
+)
+
+// create: a spoken name never resolves onto a broken preset
+await assert.rejects(
+  create.execute({ message: '开工', agentPreset: '坏预设' }, exec('call-create-preset-broken-name')),
+  /agent preset "坏预设" is not in the preset roster\..*id=broken-preset name=坏预设 \(broken\)/s,
+)
+
+// create: a named preset without a roster is refused instead of silently dropped
+presetsService = undefined
+await assert.rejects(
+  create.execute({ message: '开工', agentPreset: 'coder' }, exec('call-create-preset-no-roster')),
+  /composes no Agent preset roster.*Omit agentPreset/s,
+)
+// presets: an empty roster answers without failing
+assert.deepEqual(await presets.execute({}, exec('call-presets-empty')), { presets: [], total: 0 })
+
+// create: an omitted preset stays omitted, with or without a roster
+const presetless = await create.execute({ message: '开工' }, exec('call-create-preset-omitted'))
+assert.equal(presetless.delivered, true)
+assert.equal(presetless.preset, undefined)
+assert.equal('agentPreset' in created.at(-1), false)
+presetsService = { defaultId: 'coder', list: async () => knownPresets }
+const defaultedPreset = await create.execute({ message: '开工' }, exec('call-create-preset-default'))
+assert.equal(defaultedPreset.delivered, true)
+assert.equal('agentPreset' in created.at(-1), false)
 
 
 console.log('smoke: all assertions passed')

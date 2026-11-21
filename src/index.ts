@@ -52,6 +52,9 @@ const MAX_MESSAGE_CHARS = 4000
 /** Model rows an unavailable-route error lists before it is cut. */
 const MAX_CATALOG_ROWS = 40
 
+/** Preset rows a roster error lists before it is cut. */
+const MAX_PRESET_ROWS = 20
+
 /** Roles a read may project; the surface also carries system, developer, and tool rows. */
 const READ_ROLES = ['user', 'assistant'] as const
 
@@ -69,6 +72,12 @@ const MODELS_DESCRIPTION = [
   'These are Host-wide routes for new Sessions; subagent model selection is a separate surface with its own restrictions.',
 ].join(' ')
 
+const PRESETS_DESCRIPTION = [
+  'List the Agent presets this Host can run in a new Session: preset id, display name, description, the default mark, and any activation failure.',
+  'Call it before session_create names an agentPreset you are not sure about — including whenever the user refers to a preset informally ("the coding preset", "用那个写代码的预设"): match what they said against the names and descriptions here instead of guessing an id.',
+  'An empty roster means this deployment composes no Agent presets; omit agentPreset then.',
+].join(' ')
+
 const SEND_DESCRIPTION = [
   'Send one message to another Session and let it run on its own.',
   'The message enters that Session as a user message and may start a new turn there, so delivery is not execution confirmation.',
@@ -84,6 +93,7 @@ const CREATE_DESCRIPTION = [
   'cwd accepts an absolute path, a path relative to the calling Session directory, or the name of a directory this Host already knows as a Workspace or a Session working directory, including a Session title the user referred to. A name matching several directories is rejected with candidates instead of guessed.',
   'message is required: a Session that never received an event stays blank and never appears in the sidebar, so every creation carries the task that Session starts with. For an empty conversation, the user creates one with the sidebar button.',
   'Pass provider and model together when the user names a model for the new Session ("open one with glm5.3"): call session_models first to resolve what they said against the exact provider and model ids. An unavailable route fails before anything is created, with the full model catalog attached so you can retry with the exact id. reasoningEffort is optional and must be one the model supports; when omitted, the Session reuses the effort you last selected manually for the same model (the Host default selection), else the model provider\'s recommended default effort.',
+  'agentPreset optionally names the Agent preset the new Session runs: pass the exact id, or the name the user called the preset by ("the coding preset"). A name is matched against the roster\'s display names, several matches list the candidates, and a miss fails with the full roster attached before anything is created; call session_presets to see the ids and names first. Omit to use the configured default preset.',
   'The new Session joins the Workspace registered at its directory.',
   'Set reply to true when the new Session should send its result back to you when it finishes.',
 ].join(' ')
@@ -138,6 +148,20 @@ interface ModelRoute {
   readonly provider: string
   readonly model: string
   readonly reasoningEffort?: string
+}
+
+/** One declared Agent preset, reduced to the display facts this plugin reads. */
+interface PresetLike {
+  readonly id: string
+  readonly name?: string
+  readonly description?: string
+  readonly broken?: string
+}
+
+/** Preset registry as this plugin consumes it: the roster and the default id. */
+interface AgentPresetsLike {
+  readonly defaultId: string
+  list(): Promise<readonly PresetLike[]>
 }
 
 /** One directory this Host already knows by name: a Workspace or a Session directory. */
@@ -357,6 +381,57 @@ export function apply(ctx: Context): void {
   })
 
   ctx.tools.register({
+    name: 'session_presets',
+    description: PRESETS_DESCRIPTION,
+    parameters: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          presets: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                name: { type: 'string' },
+                description: { type: 'string' },
+                isDefault: { type: 'boolean' },
+                broken: { type: 'string' },
+              },
+              required: ['id'],
+              additionalProperties: false,
+            },
+          },
+          total: { type: 'integer' },
+        },
+        required: ['presets', 'total'],
+        additionalProperties: false,
+      },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+    },
+    isConcurrencySafe: () => true,
+    presentCall: () => ({ card: 'generic', title: '查看可用预设', kind: 'read' }),
+    async execute() {
+      const presets = ctx.get('agentPresets') as AgentPresetsLike | undefined
+      if (presets === undefined) return { presets: [], total: 0 }
+      const roster = await presetRoster(presets)
+      const rows = roster.map(preset => ({
+        id: preset.id,
+        ...(preset.name === undefined ? {} : { name: preset.name }),
+        ...(preset.description === undefined ? {} : { description: preset.description }),
+        ...(preset.id === presets.defaultId ? { isDefault: true } : {}),
+        ...(preset.broken === undefined ? {} : { broken: preset.broken }),
+      }))
+      return { presets: rows, total: rows.length }
+    },
+  })
+
+  ctx.tools.register({
     name: 'session_send',
     description: SEND_DESCRIPTION,
     parameters: {
@@ -494,7 +569,7 @@ export function apply(ctx: Context): void {
         },
         agentPreset: {
           type: 'string',
-          description: 'Optional Agent preset id for the new Session. Omit to use the configured default.',
+          description: 'Agent preset for the new Session: an exact preset id, or the name the user called the preset by. A miss fails with the preset roster attached. Omit to use the configured default.',
         },
         provider: {
           type: 'string',
@@ -526,6 +601,10 @@ export function apply(ctx: Context): void {
           model: {
             type: 'string',
             description: 'Selected model route as "provider/model" (plus " @ effort" when one was given), when the caller named a model.',
+          },
+          preset: {
+            type: 'string',
+            description: 'Preset id the new Session runs, when the caller named a preset; a spoken name is reported as its resolved id.',
           },
           delivered: { type: 'boolean' },
         },
@@ -582,6 +661,12 @@ export function apply(ctx: Context): void {
       // unspecified "default" effort when better knowledge exists.
       const namedRoute = requestedModelRoute(input)
       const route = namedRoute === undefined ? undefined : await resolveModelRoute(ctx, namedRoute)
+      // A named preset is resolved against the live roster under the same
+      // miss-costs-nothing rule: before the Session exists, and against the
+      // display names users actually say, so "the coding preset" lands on its
+      // preset without the calling model guessing a slug id.
+      const requestedPreset = typeof input.agentPreset === 'string' ? input.agentPreset.trim() : ''
+      const agentPreset = requestedPreset === '' ? undefined : await resolveAgentPreset(ctx, requestedPreset)
       // Omitted cwd inherits the calling Session's directory. Passing nothing
       // through would let the controller fall back to the profile directory,
       // which puts the new Session in the wrong workspace (or none at all).
@@ -605,9 +690,7 @@ export function apply(ctx: Context): void {
       }
       const created = await ctx.sessionController.create({
         ...(workspaceId === undefined ? (cwd === undefined ? {} : { cwd }) : { workspaceId: workspaceId as never }),
-        ...(typeof input.agentPreset === 'string' && input.agentPreset.trim() !== ''
-          ? { agentPreset: input.agentPreset.trim() }
-          : {}),
+        ...(agentPreset === undefined ? {} : { agentPreset }),
       })
       const agent = ctx.agents.get(created.sessionId)
       // The selection is recorded before the first message is delivered, so the
@@ -661,6 +744,7 @@ export function apply(ctx: Context): void {
         ...(title === undefined ? {} : { title }),
         ...(cwd === undefined ? {} : { cwd }),
         ...(route === undefined ? {} : { model: describeModelRoute(route) }),
+        ...(agentPreset === undefined ? {} : { preset: agentPreset }),
         delivered: true,
       }
     },
@@ -903,6 +987,116 @@ function renderModelCatalog(catalog: {
  */
 function describeModelRoute(route: ModelRoute): string {
   return `${route.provider}/${route.model}${route.reasoningEffort === undefined ? '' : ` @ ${route.reasoningEffort}`}`
+}
+
+/**
+ * Resolve a requested Agent preset id or spoken name against the live roster,
+ * before the Session exists.
+ *
+ * Unlike a model id, a preset id is a declared slug the user never says out
+ * loud — what users name is the roster's display name ("the coding preset").
+ * The exact id therefore wins first; a name is then matched, in normalized
+ * form, against each usable preset's name and id, exact before partial. Every
+ * ambiguous or missing outcome names the roster, because the calling model —
+ * not this plugin — is the one that heard what the user actually said.
+ *
+ * A preset whose activation failed is never chosen by name (matching it would
+ * only dead-end), but naming its exact id reports why it cannot run.
+ * @param ctx - Host context.
+ * @param requested - caller-supplied preset id or spoken name.
+ * @returns the preset id the new Session runs.
+ */
+async function resolveAgentPreset(ctx: Context, requested: string): Promise<string> {
+  const presets = ctx.get('agentPresets') as AgentPresetsLike | undefined
+  if (presets === undefined) {
+    throw new Error(
+      'this deployment composes no Agent preset roster, so session_create cannot run a named preset. '
+      + 'Omit agentPreset to use the default composition.',
+    )
+  }
+  const roster = await presetRoster(presets)
+  const exact = roster.find(preset => preset.id === requested)
+  if (exact !== undefined) {
+    if (exact.broken !== undefined) {
+      throw new Error(`agent preset "${requested}" is currently unavailable: ${exact.broken}`)
+    }
+    return exact.id
+  }
+  const wanted = nameKey(requested)
+  if (wanted !== '') {
+    const usable = roster.filter(preset => preset.broken === undefined)
+    for (const partial of [false, true]) {
+      const candidates = presetMatches(usable, wanted, partial)
+      const only = candidates[0]
+      if (candidates.length === 1 && only !== undefined) return only.id
+      if (candidates.length > 1) {
+        throw new Error(
+          `agent preset "${requested}" matches ${candidates.length} presets: ${renderPresetCandidates(candidates)}. `
+          + 'Call session_create again with one preset id.',
+        )
+      }
+    }
+  }
+  throw new Error(
+    `agent preset "${requested}" is not in the preset roster. ${renderPresetRoster(roster, presets.defaultId)}`,
+  )
+}
+
+/**
+ * Read the preset roster, wrapping a registry failure as a tool error.
+ * @param presets - preset registry service.
+ * @returns roster rows in registry order.
+ */
+async function presetRoster(presets: AgentPresetsLike): Promise<readonly PresetLike[]> {
+  try {
+    return await presets.list()
+  } catch (error: unknown) {
+    throw new Error(`cannot read the preset roster: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+/**
+ * Which usable presets answer to a normalized spoken name.
+ * @param presets - presets without an activation failure.
+ * @param wanted - normalized name the caller supplied.
+ * @param partial - whether containment counts, or only an exact key.
+ * @returns the matching presets, in roster order.
+ */
+function presetMatches(presets: readonly PresetLike[], wanted: string, partial: boolean): readonly PresetLike[] {
+  return presets.filter(preset => {
+    const name = nameKey(preset.name ?? '')
+    const id = nameKey(preset.id)
+    return partial
+      ? name.includes(wanted) || id.includes(wanted)
+      : name === wanted || id === wanted
+  })
+}
+
+/**
+ * Render candidate rows for an error that asks the model to disambiguate.
+ * @param candidates - matching presets.
+ * @returns comma-separated `id (name)` entries.
+ */
+function renderPresetCandidates(candidates: readonly PresetLike[]): string {
+  return candidates
+    .slice(0, MAX_CANDIDATES)
+    .map(preset => `${preset.id}${preset.name === undefined ? '' : ` (${preset.name})`}`)
+    .join(', ')
+}
+
+/**
+ * Render the preset roster as one retry-ready list, default first.
+ * @param roster - every declared preset, including broken ones.
+ * @param defaultId - preset a request without a preset would run.
+ * @returns a sentence with up to {@link MAX_PRESET_ROWS} labelled rows.
+ */
+function renderPresetRoster(roster: readonly PresetLike[], defaultId: string): string {
+  const rows = roster.map(preset =>
+    `id=${preset.id}${preset.name === undefined ? '' : ` name=${preset.name}`}`
+    + `${preset.id === defaultId ? ' (default)' : ''}${preset.broken === undefined ? '' : ' (broken)'}`)
+  return `Default: ${defaultId}. `
+    + `Available: ${rows.slice(0, MAX_PRESET_ROWS).join('; ')}${rows.length > MAX_PRESET_ROWS ? '; …' : ''}. `
+    + 'Call session_create again with an exact preset id; session_presets lists this roster with descriptions.'
 }
 
 /**

@@ -2,10 +2,11 @@
 
 简体中文 | [English](./README.md)
 
-DeepSeek Harness 的本地插件：给模型**五个跨会话消息**，并在 `/` 菜单里给你一个「**会话消息**」入口（英文界面显示 Session message）。
+DeepSeek Harness 的本地插件：给模型**六个跨会话消息**，并在 `/` 菜单里给你一个「**会话消息**」入口（英文界面显示 Session message）。
 
 - `session_list` — 按标题 / id / 工作目录查找可发消息的会话
 - `session_models` — 列出新会话可用的模型路由（provider、model、显示名、思考档位、默认选择），指定前先查
+- `session_presets` — 列出新会话可用的 Agent 预设（id、显示名、描述、默认标记），指定前先查
 - `session_send` — 向指定会话投递一条消息；单向投递，**发出即结束**，`reply: true` 时让对方把结果发回来
 - `session_read` — 仅在用户明确要求时，读取某个会话最近的用户 / 助手消息
 - `session_create` — 新建会话（可指定目录 / 标题 / Agent 预设 / 模型路由），并附一条首消息
@@ -29,6 +30,7 @@ dsh plugin --profile <name> add @laoyuehanni/dsh-session-tools
 |---|---|---|
 | `session_list` | 列出可见会话：id、标题、cwd、创建时间、归档 / 子代理标记 | 用户用自然语言提到某个会话时，先定位它 |
 | `session_models` | 列出本 Host 可在新会话运行的全部模型路由，含显示名、思考档位与默认选择 | `session_create` 要指定模型 / 档位之前，或用户问有哪些模型时 |
+| `session_presets` | 列出本 Host 可在新会话运行的全部 Agent 预设，含显示名、描述与默认标记 | `session_create` 要指定预设之前，或用户随口提到某个预设时 |
 | `session_send` | 把一条消息投递进另一个会话的收件箱 | 把活分给另一个会话，或回复一个把活分过来的会话 |
 | `session_read` | 投影某个会话最近的 `user` / `assistant` 文本行 | 仅当用户要看那个会话说了什么——**绝不**用于跟进自己发出的消息 |
 | `session_create` | 先把目录注册成 Workspace，再在其中建会话，可选设标题与模型路由（先对照实时目录校验），并投递必填的首消息 | 把独立的工作挪进自己的会话（另一个 checkout、另一个插件目录） |
@@ -40,6 +42,8 @@ dsh plugin --profile <name> add @laoyuehanni/dsh-session-tools
 它的 `message` 是必填的。零事件的会话在侧边栏不占行，不给首消息就创建出一个用户看不到、也点不进去的东西，所以工具直接拒绝；空会话请走侧边栏的「新建会话」按钮。
 
 可选的模型路由指定新会话跑哪个模型：`provider` 与 `model` 一起传（`session_models` 会列出精确 id 与思考档位），可选 `reasoningEffort`。选择在首条消息投递之前写入，且**绝不会改动你的全局默认模型**。省略 `reasoningEffort` 时按已知信息补全：指定的模型若正是你在 GUI 最后一次手动切换选中的模型，就沿用那次手选的档位；否则用该模型 provider 声明的推荐档。
+
+可选的 `agentPreset` 指定新会话跑哪个 Agent 预设：可以传精确 id，也可以传你嘴里那个称呼（「用那个写代码的预设」）。称呼在创建任何东西之前按预设名册的显示名解析（`session_presets` 列出名册）；命中多个时返回候选，一个不命中时返回完整名册，省略则用配置的默认预设。在没有预设名册的 Host 上指名预设会被明确拒绝，而不是被悄悄丢弃。
 
 ## 投递模型
 
@@ -82,13 +86,13 @@ dsh plugin --profile <name> add @laoyuehanni/dsh-session-tools
 
 ## 配置
 
-无。插件只注册四个工具和两个浏览器贡献，不读取任何配置。
+无。插件只注册六个工具和两个浏览器贡献，不读取任何配置。
 
 ## 实现要点
 
 - **标题** 来自会话投影（`sessionProjections`，冷会话用可选的 `sessionProjectionCache`），不折叠日志，避免列表调用变慢。
 - **归档 / 子代理判断** 读取 `workspaceRegistry.archivedSessionIds` 与会话头的 `origin`。
-- **新建会话**：先把 `cwd` 解析成真实存在的目录（优先 `workspaceRegistry.resolveByPath`，退回 `stat`）。参数不是目录时，按名字与 `workspaceRegistry.list()` 的标题/路径、以及可见会话的 `cwd` 匹配——分隔符、大小写与前后空格/下划线/连字符都归一化，所以口语名会落到侧边栏显示的那个目录。随后把目录注册成 Workspace（`workspaceRegistry.create`），再用 `workspaceId` 建会话——只传 `cwd` 建出来的会话不属于任何 Workspace，不会出现在侧边栏。省略 `cwd` 时继承调用方会话的目录；标题在 Agent 已加载时通过 `sessionTitle.rename` 设置，失败不视为错误。首消息是必填的，并走与 `session_send` 相同的交接路径，因此新会话必定拥有事件、也就必定拥有侧边栏行。可选的 `provider` / `model` / `reasoningEffort` 路由先对照 `sessionController.modelCatalog()` 校验（会话尚未创建，miss 零成本并附上完整目录），再在首条消息投递前经 `agent.model.select()` 写入——只给该会话追加一条 `model/selection` 事件，绝不触碰全局默认模型。
+- **新建会话**：先把 `cwd` 解析成真实存在的目录（优先 `workspaceRegistry.resolveByPath`，退回 `stat`）。参数不是目录时，按名字与 `workspaceRegistry.list()` 的标题/路径、以及可见会话的 `cwd` 匹配——分隔符、大小写与前后空格/下划线/连字符都归一化，所以口语名会落到侧边栏显示的那个目录。随后把目录注册成 Workspace（`workspaceRegistry.create`），再用 `workspaceId` 建会话——只传 `cwd` 建出来的会话不属于任何 Workspace，不会出现在侧边栏。省略 `cwd` 时继承调用方会话的目录；标题在 Agent 已加载时通过 `sessionTitle.rename` 设置，失败不视为错误。首消息是必填的，并走与 `session_send` 相同的交接路径，因此新会话必定拥有事件、也就必定拥有侧边栏行。可选的 `provider` / `model` / `reasoningEffort` 路由先对照 `sessionController.modelCatalog()` 校验（会话尚未创建，miss 零成本并附上完整目录），再在首条消息投递前经 `agent.model.select()` 写入——只给该会话追加一条 `model/selection` 事件，绝不触碰全局默认模型。可选的 `agentPreset` 同样在创建前对照 `agentPresets` 名册解析：精确 id 优先，其次对可用预设的显示名做归一化匹配（先精确、后包含），歧义列候选、miss 附全名册；无名册的部署指名预设会被拒绝而非静默丢弃。
 - **读取会话**：`sessionQuery.readSurface(id)` 返回目标会话当前模型面，插件从中只投影 `user/message` 与 `assistant/message` 的 `text` 块——推理、图片、文件、工具调用与工具结果都不进结果。单条正文上限 4000 字，超出截断加省略号。
 - **会话 chip** 是一个 `appearance: 'session'` 的 `ReferenceInsert`。它的序列化由插件自己注册的 trigger source（`codec.serialize`）负责，产出方括号标记。编辑器拒绝 chip 时，回退为把同样的标记以纯文本追加到已有草稿之后。
 
