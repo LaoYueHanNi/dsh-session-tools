@@ -60,6 +60,51 @@ const READ_ROLES = ['user', 'assistant'] as const
 
 type ReadRole = (typeof READ_ROLES)[number]
 
+/** Display copy this plugin falls back to for one shipped Agent preset. */
+interface BuiltInPresetCopy {
+  /** Primary display name, in the language this Host's users speak. */
+  readonly name: string
+  /** Names the preset also answers to in the other shipped language. */
+  readonly aliasNames: readonly string[]
+  readonly description: string
+}
+
+/**
+ * Display copy for the four Agent presets DSH ships built in, checked against
+ * the Web client dictionaries (dsh-client-ui-agent-preset/src/client/locales.ts).
+ *
+ * A shipped preset's Host declaration deliberately publishes no `name`: its
+ * localized copy lives only in the Web client's locale dictionaries, which
+ * Host-side tools cannot read. Without this fallback the roster lists bare
+ * ids ("cordis"), so neither `session_presets` nor spoken-name matching can
+ * answer to what the user actually says. The rule mirrors
+ * `dsh-agent-preset-registry/display`: a declaration that publishes its own
+ * `name` owns its copy and never sees this table, so an upstream declaration
+ * that starts naming itself takes over automatically.
+ */
+const BUILT_IN_PRESET_COPY: Readonly<Record<string, BuiltInPresetCopy>> = {
+  standard: {
+    name: '标准模式',
+    aliasNames: ['Standard mode'],
+    description: '处理代码、文件和资料，适合大多数任务。Agent 会按需使用检索、编辑和终端等工具。',
+  },
+  ptc: {
+    name: 'PTC 模式',
+    aliasNames: ['PTC mode'],
+    description: '包含标准模式的所有能力，更适合批量调用工具，并对结果进行筛选、整理、去重、统计或汇总的任务。',
+  },
+  minimal: {
+    name: '极简模式',
+    aliasNames: ['Minimal mode'],
+    description: 'Agent 使用终端和图片读取工具，并支持上下文压缩，适合测试和对比其基础表现。',
+  },
+  cordis: {
+    name: '创造模式',
+    aliasNames: ['Creator mode'],
+    description: '用对话定制 DSH：让 Agent 编写插件，添加新功能或界面；也能组合工具和提示词，创建自己的模式。',
+  },
+}
+
 const LIST_DESCRIPTION = [
   'Discover Sessions, excluding the calling Session. Archived and delegated Sessions are included and marked, but cannot be messaged; blank Sessions may be listed and addressed by ID.',
   'Returns sessionId, title, working directory, creation time, and whether the target is archived or a delegated subagent.',
@@ -164,6 +209,13 @@ interface PresetLike {
   readonly description?: string
   readonly broken?: string
 }
+
+/**
+ * One roster row after built-in display-copy fallback: the declaration, plus
+ * the localized alias names a shipped preset also answers to in matching.
+ * Alias names never surface in tool output.
+ */
+type RosterPreset = PresetLike & { readonly aliasNames?: readonly string[] }
 
 /** Preset registry as this plugin consumes it: the roster and the default id. */
 interface AgentPresetsLike {
@@ -1020,7 +1072,8 @@ function describeModelRoute(route: ModelRoute): string {
  * Unlike a model id, a preset id is a declared slug the user never says out
  * loud — what users name is the roster's display name ("the coding preset").
  * The exact id therefore wins first; a name is then matched, in normalized
- * form, against each usable preset's name and id, exact before partial. Every
+ * form, against each usable preset's name, id, and localized aliases, exact
+ * before partial. Every
  * ambiguous or missing outcome names the roster, because the calling model —
  * not this plugin — is the one that heard what the user actually said.
  *
@@ -1067,32 +1120,58 @@ async function resolveAgentPreset(ctx: Context, requested: string): Promise<stri
 }
 
 /**
- * Read the preset roster, wrapping a registry failure as a tool error.
+ * Read the preset roster, wrapping a registry failure as a tool error, and
+ * complete each shipped preset with its built-in display copy.
  * @param presets - preset registry service.
- * @returns roster rows in registry order.
+ * @returns roster rows in registry order, with the fallback applied.
  */
-async function presetRoster(presets: AgentPresetsLike): Promise<readonly PresetLike[]> {
+async function presetRoster(presets: AgentPresetsLike): Promise<readonly RosterPreset[]> {
   try {
-    return await presets.list()
+    return (await presets.list()).map(withBuiltInPresetCopy)
   } catch (error: unknown) {
     throw new Error(`cannot read the preset roster: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 
 /**
+ * Complete one roster row with its built-in display copy, or pass it through.
+ *
+ * Mirrors `isBuiltInPreset` from `dsh-agent-preset-registry/display`: only a
+ * shipped preset id that publishes no `name` counts as built in, so custom
+ * declarations keep their own copy untouched, and a future upstream `name`
+ * takes over automatically. A declared `description` still wins over the
+ * fallback one; the alias names ride along for matching only.
+ * @param preset - roster row exactly as the registry declared it.
+ * @returns the row with name, description, and match aliases filled in.
+ */
+function withBuiltInPresetCopy(preset: PresetLike): RosterPreset {
+  const copy = preset.name === undefined ? BUILT_IN_PRESET_COPY[preset.id] : undefined
+  if (copy === undefined) return preset
+  return {
+    ...preset,
+    name: copy.name,
+    ...(preset.description === undefined ? { description: copy.description } : {}),
+    aliasNames: copy.aliasNames,
+  }
+}
+
+/**
  * Which usable presets answer to a normalized spoken name.
+ *
+ * The keys are the display name, the id, and every localized alias name a
+ * built-in preset also answers to, so both「创造模式」and "Creator mode"
+ * select `cordis`.
  * @param presets - presets without an activation failure.
  * @param wanted - normalized name the caller supplied.
  * @param partial - whether containment counts, or only an exact key.
  * @returns the matching presets, in roster order.
  */
-function presetMatches(presets: readonly PresetLike[], wanted: string, partial: boolean): readonly PresetLike[] {
+function presetMatches(presets: readonly RosterPreset[], wanted: string, partial: boolean): readonly RosterPreset[] {
   return presets.filter(preset => {
-    const name = nameKey(preset.name ?? '')
-    const id = nameKey(preset.id)
+    const keys = [nameKey(preset.name ?? ''), nameKey(preset.id), ...(preset.aliasNames ?? []).map(alias => nameKey(alias))]
     return partial
-      ? name.includes(wanted) || id.includes(wanted)
-      : name === wanted || id === wanted
+      ? keys.some(key => key.includes(wanted))
+      : keys.some(key => key === wanted)
   })
 }
 
@@ -1101,7 +1180,7 @@ function presetMatches(presets: readonly PresetLike[], wanted: string, partial: 
  * @param candidates - matching presets.
  * @returns comma-separated `id (name)` entries.
  */
-function renderPresetCandidates(candidates: readonly PresetLike[]): string {
+function renderPresetCandidates(candidates: readonly RosterPreset[]): string {
   return candidates
     .slice(0, MAX_CANDIDATES)
     .map(preset => `${preset.id}${preset.name === undefined ? '' : ` (${preset.name})`}`)
@@ -1114,7 +1193,7 @@ function renderPresetCandidates(candidates: readonly PresetLike[]): string {
  * @param defaultId - preset a request without a preset would run.
  * @returns a sentence with up to {@link MAX_PRESET_ROWS} labelled rows.
  */
-function renderPresetRoster(roster: readonly PresetLike[], defaultId: string): string {
+function renderPresetRoster(roster: readonly RosterPreset[], defaultId: string): string {
   const rows = roster.map(preset =>
     `id=${preset.id}${preset.name === undefined ? '' : ` name=${preset.name}`}`
     + `${preset.id === defaultId ? ' (default)' : ''}${preset.broken === undefined ? '' : ' (broken)'}`)

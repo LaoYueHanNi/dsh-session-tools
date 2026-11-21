@@ -44,7 +44,7 @@ Its `message` is required. A Session that never received an event carries no sid
 
 An optional model route names the model the new Session runs: pass `provider` and `model` together (`session_models` lists the exact ids with reasoning efforts), optionally with `reasoningEffort`. The selection is recorded before the first message is delivered, and it never changes your default model. An omitted effort is completed from what the Host already knows: when the named model is the one you last selected manually in the GUI, that same effort is reused; otherwise the model's provider-recommended default applies.
 
-An optional `agentPreset` names the Agent preset the new Session runs: the exact id, or the name you actually called it ("the coding preset"). A name resolves against the preset roster's display names (`session_presets` lists them) before anything is created; several matches return candidates, an unknown one returns the whole roster, and omitting it keeps the configured default. Naming a preset on a Host that composes no roster is refused instead of silently dropped.
+An optional `agentPreset` names the Agent preset the new Session runs: the exact id, or the name you actually called it ("the coding preset"). A name resolves against the preset roster's display names (`session_presets` lists them; the four DSH built-in presets — Standard / PTC / Minimal / Creator — carry their shipped Chinese and English names here even though their declarations publish none) before anything is created; several matches return candidates, an unknown one returns the whole roster, and omitting it keeps the configured default. Naming a preset on a Host that composes no roster is refused instead of silently dropped.
 
 ## Delivery model
 

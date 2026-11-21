@@ -8,6 +8,8 @@ Status: implemented
 
 还有一个静默坑：没配预设名册的 profile 上（`ctx.get('agentPresets')` 为 undefined），controller 的 `composeAgent` 直接忽略 `agentPreset` 参数——用户明确指定的预设被无声丢弃，会话按默认组合跑掉了。
 
+第三层问题在宿主内置预设上：DSH 内置的 standard / ptc / minimal / cordis 四个预设，宿主声明刻意不写 `name`（`dsh-agent-preset-registry/display` 的 `isBuiltInPreset` 判定就依赖这一点），本地化文案放在 Web 客户端的 locale 字典里，Host 工具链读不到。于是这套按显示名工作的机制对最常见的一组预设反而失效：`session_presets` 列出的是四个裸 id，用户说「开个创造模式的会话」时名册里没有任何可对照的词。
+
 ## Decision
 
 融合两个先例：发现走 [模型路由选择](2026-11-21-session-create-model-selection.md) 的清单工具模式，解析走 [cwd 口语名解析](2026-11-20-cwd-spoken-name-resolution.md) 的本地匹配模式。
@@ -21,6 +23,7 @@ Status: implemented
    - 零命中 → 报错附全名册渲染（含默认标记与 broken 标记，上限 20 行）并指向 `session_presets`。
    - 口语匹配刻意跳过 broken 预设——匹配到只会死胡同；但精确 id 命中 broken 仍明确报 broken，用户指名道姓时给出真话。
 3. 解析结果作为 `preset` 字段回显在工具输出里，让调用方确认口语名落到了哪个预设。
+4. **内置预设显示名 fallback**：名册行 id 属于 DSH 四个内置预设（standard / ptc / minimal / cordis）且声明未写 `name` 时，用插件内置的显示文案表补全 name / description（中文主名 + 英文别名，文案逐字取自宿主 Web 客户端 locale 字典 `dsh-client-ui-agent-preset/src/client/locales.ts`）。补全发生在 `presetRoster()` 读出名册之后，名册输出、口语匹配、错误信息里的名册渲染因此统一生效；匹配键在 name / id 之外扩到别名（`nameKey` 归一化后精确与包含比对），「创造模式」与 "Creator mode" 都命中 cordis。判定条件与上游 `isBuiltInPreset` 对齐：声明自带 `name` 的行整体走声明文案、永不覆盖，上游将来给内置声明补了 `name` 后声明值自动优先、fallback 自动退位；声明的 `description` 同样优先于 fallback 文案。别名只参与匹配，不进工具输出。
 
 工具描述与参数描述同步写明精确 id / 口语称呼两种给法与歧义行为。
 
@@ -34,5 +37,5 @@ Status: implemented
 
 ## Consequences
 
-- 代价：口语名只匹配可用预设，「称呼恰好只对上 broken 预设」时得到零命中错误（全名册渲染带 broken 标记，模型可见原因并改口）；`agentPresets` 与其他 `ctx.get` 服务一样走本地结构接口（[零运行时依赖](2026-11-20-zero-runtime-dependencies.md)），宿主形状变化编译期不报警；带 `agentPreset` 的每次创建多一次名册读取（registry 内部有 diagnostic 审计，创建不是热路径）。
-- 换来：用户说「用那个写代码的预设」直接落到正确预设，模型不必先失败一次；指定无效预设零副作用失败、附完整名册一次重试可解；无名册部署不再静默丢预设；`session_presets` 补上正向发现。冒烟测试覆盖名册列出、无名册空清单、精确 id、显示名归一化命中、包含命中、歧义、零命中、broken 精确、broken 口语排除、无名册拒绝、未指定省略共十一条分支。
+- 代价：口语名只匹配可用预设，「称呼恰好只对上 broken 预设」时得到零命中错误（全名册渲染带 broken 标记，模型可见原因并改口）；`agentPresets` 与其他 `ctx.get` 服务一样走本地结构接口（[零运行时依赖](2026-11-20-zero-runtime-dependencies.md)），宿主形状变化编译期不报警；带 `agentPreset` 的每次创建多一次名册读取（registry 内部有 diagnostic 审计，创建不是热路径）；内置 fallback 表是宿主 locale 文案的静态快照，上游改文案或增删内置预设需随插件版本跟进，且只覆盖中英两种称呼，其他语言的用户仍需说 id 或显示名。
+- 换来：用户说「用那个写代码的预设」直接落到正确预设，模型不必先失败一次；内置四预设摆脱裸 id，名册输出可读，「创造模式」/"Creator mode" 一类口语称呼直接命中；指定无效预设零副作用失败、附完整名册一次重试可解；无名册部署不再静默丢预设；`session_presets` 补上正向发现。冒烟测试覆盖名册列出、无名册空清单、精确 id、显示名归一化命中、包含命中、歧义、零命中、broken 精确、broken 口语排除、无名册拒绝、未指定省略，以及内置 fallback 的名册补全、声明文案优先、中英文名命中、内置名部分命中、miss 渲染共十六条分支。

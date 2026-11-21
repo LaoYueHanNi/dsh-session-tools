@@ -611,6 +611,48 @@ const defaultedPreset = await create.execute({ message: '开工' }, exec('call-c
 assert.equal(defaultedPreset.delivered, true)
 assert.equal('agentPreset' in created.at(-1), false)
 
+// presets: built-in ids without a declared name fall back to shipped display copy
+presetsService = { defaultId: 'standard', list: async () => [
+  { id: 'standard' },
+  { id: 'cordis', description: '宿主将来带的描述不被覆盖' },
+  { id: 'minimal', name: '自定义极简' },
+  { id: 'coder', name: '写代码助手', description: '为编码任务调整工具与提示' },
+] }
+const builtinRoster = await presets.execute({}, exec('call-presets-builtin'))
+assert.equal(builtinRoster.total, 4)
+const standardCopy = builtinRoster.presets.find(row => row.id === 'standard')
+assert.equal(standardCopy.name, '标准模式')
+assert.equal(standardCopy.description, '处理代码、文件和资料，适合大多数任务。Agent 会按需使用检索、编辑和终端等工具。')
+assert.equal(standardCopy.isDefault, true)
+assert.equal('aliasNames' in standardCopy, false)
+// a declared description still wins over the fallback one
+const cordisCopy = builtinRoster.presets.find(row => row.id === 'cordis')
+assert.equal(cordisCopy.name, '创造模式')
+assert.equal(cordisCopy.description, '宿主将来带的描述不被覆盖')
+// a declaration that publishes its own name keeps its own copy entirely
+const namedMinimal = builtinRoster.presets.find(row => row.id === 'minimal')
+assert.equal(namedMinimal.name, '自定义极简')
+assert.equal(namedMinimal.description, undefined)
+
+// create: a built-in preset answers to its shipped Chinese name
+const zhSpoken = await create.execute({ message: '开工', agentPreset: '创造 模式' }, exec('call-create-preset-builtin-zh'))
+assert.equal(zhSpoken.preset, 'cordis')
+
+// create: and to its shipped English name
+const enSpoken = await create.execute({ message: '开工', agentPreset: 'Creator mode' }, exec('call-create-preset-builtin-en'))
+assert.equal(enSpoken.preset, 'cordis')
+
+// create: a partially spoken built-in name resolves when it is unique
+const partialBuiltin = await create.execute({ message: '开工', agentPreset: '标准' }, exec('call-create-preset-builtin-partial'))
+assert.equal(partialBuiltin.preset, 'standard')
+
+// create: a miss against the built-in roster renders the completed names
+const createdBeforeBuiltin = created.length
+await assert.rejects(
+  create.execute({ message: '开工', agentPreset: '翻译' }, exec('call-create-preset-builtin-missing')),
+  /agent preset "翻译" is not in the preset roster\. Default: standard\. Available: id=standard name=标准模式 \(default\); id=cordis name=创造模式; id=minimal name=自定义极简; id=coder name=写代码助手\. Call session_create again with an exact preset id; session_presets lists this roster with descriptions\./,
+)
+assert.equal(created.length, createdBeforeBuiltin)
 
 // Recovery retains the created Session ID and its admission request ID.
 rejectPrompt = true
