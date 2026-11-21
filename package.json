@@ -1,6 +1,6 @@
 {
   "name": "@laoyuehanni/dsh-session-tools",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DSH plugin: list visible Sessions, hand one message to another Session, and move separate work into a new Session",
   "keywords": [
     "dsh",
