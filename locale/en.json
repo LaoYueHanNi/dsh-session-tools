@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Session tools",
+    "description": "Lets the model in one Session talk to the model in another: pass a message, hand over a task, ask for a reply, or move separate work into a new Session. Type / and pick Session message to choose a Session and write the instruction.",
+    "detail": "docs/DETAIL.md"
+  }
+}

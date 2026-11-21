@@ -1,0 +1,27 @@
+node_modules/
+# Build output — enters the npm tarball via prepublishOnly, never the repo
+lib/
+*.tsbuildinfo
+.npm-cache/
+# Local pnpm content-addressable store (fallback when the global store is unwritable)
+.pnpm-store/
+# Local `pnpm pack` artifacts for offline install testing
+*.tgz
+
+# IDE / editor config
+.idea/
+.vscode/
+.zcode/
+.fleet/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Machine-local temporary-mount patch for `dsh web --patch` (see cordis.example.yml)
+cordis.yml
+
+# Machine-local agent instructions (never commit)
+.claude/
+AGENTS.local.md
+CLAUDE.local.md

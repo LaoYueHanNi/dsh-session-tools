@@ -1,0 +1,8 @@
+# Bundle patch layer of the session-tools plugin. Applied automatically when
+# the package is installed into a profile via `dsh plugin --profile <name> add`
+# (a package declaring `dsh.bundle` joins the profile's bundle stack, so no
+# manual profile editing is needed). The row references the package by name.
+- insert:
+    - id: session-tools
+      name: '@laoyuehanni/dsh-session-tools'
+      config: {}
