@@ -1,13 +1,12 @@
 /**
  * Browser half of the session-tools plugin.
  *
- * Two independent contributions:
+ * Browser contributions:
  *
- * 1. A row decoration above a user message that arrived from another Session.
- * 2. A `/` command row (Session message / 会话消息): opening it lists Sessions, and picking one
- *    fills a target MARKER into the composer. Whatever the user types after the
- *    marker is an instruction for the model, which then composes the message and
- *    calls `session_send` — there is no direct-delivery command path on purpose.
+ * A `/` command row (Session message / 会话消息): opening it lists Sessions, and picking one
+ * fills a target MARKER into the composer. Whatever the user types after the
+ * marker is an instruction for the model, which then composes the message and
+ * calls `session_send` — there is no direct-delivery command path on purpose.
  *
  * The picker uses the shared `popupSelect` shell instead of a self-rendered
  * overlay: the shell owns its anchoring, surface material, search field, and
@@ -51,12 +50,15 @@ interface LocaleService {
 interface SessionSummaryLike {
   readonly cwd?: unknown
   readonly title?: unknown
+  readonly displayTitle?: unknown
+  readonly blank?: unknown
+  readonly origin?: unknown
   readonly updatedAt?: unknown
   readonly createdAt?: unknown
 }
 
 interface SessionIndex {
-  getSnapshot(): { readonly byId?: Record<string, SessionSummaryLike> } | null | undefined
+  getSnapshot(): { readonly ids?: readonly string[], readonly byId?: Record<string, SessionSummaryLike>, readonly phase?: string } | null | undefined
 }
 
 interface SessionScope {
@@ -76,19 +78,6 @@ interface ConversationService {
   input: { for(scope: SessionScope): ComposerInput }
 }
 
-interface CandidateLike {
-  readonly sessionId: string
-  readonly displayTitle?: unknown
-  readonly label?: unknown
-  readonly cwd?: unknown
-  readonly createdAt?: unknown
-}
-
-interface ReferenceResolverLike {
-  candidates(sessionId: string, query: string, signal: AbortSignal):
-    Promise<{ readonly ok: boolean, readonly value?: readonly CandidateLike[] } | undefined>
-}
-
 interface SessionsService {
   list: SessionIndex
   scope(sessionId: string): SessionScope | undefined
@@ -100,7 +89,7 @@ type Scope = ClientContext & {
   slots: SlotsService
   sessions: SessionsService
   conversation: ConversationService
-  remote?: { readonly sessionReferenceResolver?: ReferenceResolverLike }
+  workspaces: { readonly list: { getSnapshot(): { readonly archivedSessionIds?: readonly string[], readonly phase?: string } } }
   inputTriggers?: InputTriggersService
   commandUi?: CommandsService
   locale?: LocaleService
@@ -112,22 +101,6 @@ const h = React.createElement as (
   props?: Record<string, unknown> | null,
   ...children: unknown[]
 ) => unknown
-
-const BADGE_STYLE = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: '4px',
-  margin: '2px 0 6px',
-  padding: '0',
-  fontSize: '12px',
-  lineHeight: '18px',
-  color: 'var(--dsw-color-text-tertiary, #8b8f98)',
-}
-
-const SENDER_STYLE = {
-  color: 'var(--dsw-color-text-secondary, #b9bdc5)',
-  fontWeight: 500,
-}
 
 /** Longest title a picker row carries before it is cut for display. */
 const MAX_ROW_TITLE = 80
@@ -148,7 +121,6 @@ const STRINGS = {
     'search.noResults': 'No matching Sessions',
     'untitled': 'Untitled Session',
     'marker.wrap': 'Target session: {}',
-    'badge.prefix': 'Message from',
     'notice.prefix': 'Session message: {}',
     'time.now': 'now',
   },
@@ -160,7 +132,6 @@ const STRINGS = {
     'search.noResults': '没有匹配的会话',
     'untitled': '未命名会话',
     'marker.wrap': '目标会话：{}',
-    'badge.prefix': '收到消息，来自',
     'notice.prefix': '会话消息：{}',
     'time.now': '刚刚',
   },
@@ -209,9 +180,7 @@ interface PickerOption {
  * @returns the marker text placed in the submitted prompt.
  */
 function renderTargetMarker(ref: string): string {
-  const untitled = t('untitled')
-  const title = chipTitles.get(ref)
-  return `[${t('marker.wrap', title === undefined || title === untitled ? ref : title)}]`
+  return `[${t('marker.wrap', ref)}]`
 }
 
 /**
@@ -261,46 +230,6 @@ function SessionToolIcon(props: Record<string, unknown>): unknown {
   )
 }
 
-/** The handoff source a row carries, or null for every other row. */
-interface HandoffSource {
-  readonly kind: 'session-handoff'
-  readonly senderSessionId?: unknown
-  readonly senderTitle?: unknown
-}
-
-/**
- * Elect the badge for rows that carry this plugin's handoff source.
- * @param owner - durable message source and row kind.
- * @returns the handoff source, or null for every other row.
- */
-function selectHandoff(owner: unknown): HandoffSource | null {
-  const source = owner !== null && typeof owner === 'object'
-    ? (owner as { source?: unknown }).source
-    : undefined
-  if (source === null || typeof source !== 'object') return null
-  if ((source as { kind?: unknown }).kind !== 'session-handoff') return null
-  return source as HandoffSource
-}
-
-/**
- * Source decoration above one user message bubble.
- * @param props - matched handoff source.
- * @returns the sender line, or null when it names no sender.
- */
-function HandoffBadge(props: { readonly matched: HandoffSource }): unknown {
-  const source = props.matched
-  const title = typeof source.senderTitle === 'string' && source.senderTitle !== ''
-    ? source.senderTitle
-    : typeof source.senderSessionId === 'string' ? source.senderSessionId : ''
-  if (title === '') return null
-  return h(
-    'div',
-    { style: BADGE_STYLE, 'data-session-handoff': source.senderSessionId ?? '' },
-    h('span', null, t('badge.prefix')),
-    h('span', { style: SENDER_STYLE }, title),
-  )
-}
-
 /**
  * Last path segment, so a row can name its workspace without the whole path.
  * @param path - absolute or Windows-style directory.
@@ -332,84 +261,33 @@ function relativeTime(timestamp: unknown): string {
 }
 
 /**
- * Read the client-side session index: titles and activity the sidebar uses.
- * @param ctx - client root context.
- * @returns summary map keyed by session id, empty when unavailable.
- */
-function sessionSummaries(ctx: Scope): Record<string, SessionSummaryLike> {
-  try {
-    const snapshot = ctx.sessions.list.getSnapshot()
-    const byId = snapshot === null || typeof snapshot !== 'object' ? undefined : snapshot.byId
-    return byId !== null && typeof byId === 'object' ? byId : {}
-  } catch {
-    return {}
-  }
-}
-
-/**
- * Read the target candidates once for one popup open.
- *
- * The catalog comes from the same resolver the native `@` session reference
- * uses, so search and reachability match it exactly — this path only ever
- * writes a command line, never a reference chip, so nothing is read.
+ * Build picker rows from the rc.5 catalog and archive metadata. The popup
+ * filters these rows locally, so include the complete Host catalog and put
+ * the unabridged title and ID in the searchable detail field.
+ * Blank Sessions are intentionally omitted: they are reusable sidebar drafts.
  * @param ctx - client root context.
  * @param sessionId - asking Session.
  * @param signal - popup cancellation.
- * @returns picker options in source order.
+ * @returns sendable picker options in Host catalog order.
  */
 async function sessionOptions(ctx: Scope, sessionId: string, signal: AbortSignal): Promise<PickerOption[]> {
+  signal.throwIfAborted()
+  const snapshot = ctx.sessions.list.getSnapshot()
+  const workspace = ctx.workspaces.list.getSnapshot()
+  // Archive membership is authoritative only after its baseline is ready.
+  if (snapshot?.phase !== 'ready' || workspace.phase !== 'ready'
+    || !Array.isArray(snapshot.ids) || !Array.isArray(workspace.archivedSessionIds)) return []
+  const archived = new Set(workspace.archivedSessionIds)
   const rows: PickerOption[] = []
-  const summaries = sessionSummaries(ctx)
-  const push = (id: unknown, raw: unknown, meta: {
-    readonly cwd?: unknown
-    readonly updatedAt?: unknown
-    readonly createdAt?: unknown
-  }): void => {
-    if (typeof id !== 'string' || id === '' || id === sessionId) return
-    const named = typeof raw === 'string' && raw !== '' && raw !== id ? raw : ''
-    const text = named === '' ? t('untitled') : named
-    const label = text.length <= MAX_ROW_TITLE ? text : `${text.slice(0, MAX_ROW_TITLE)}…`
-    const detail = [lastSegment(meta.cwd), relativeTime(meta.updatedAt ?? meta.createdAt)]
-      .filter(part => part !== '')
-      .join(' · ')
-    rows.push({ id, label, ...detail === '' ? {} : { detail } })
-  }
-
-  let items: readonly CandidateLike[] | undefined
-  try {
-    // Optional on purpose: a profile without the session-reference remote
-    // must degrade to the local index, not stop this bundle from loading.
-    const resolver = ctx.remote?.sessionReferenceResolver
-    if (resolver !== undefined && typeof resolver.candidates === 'function') {
-      const result = await resolver.candidates(sessionId, '', signal)
-      if (result !== undefined && result.ok === true) items = result.value
-      else console.warn('[session-tools] session reference resolver returned no value', result)
-    } else {
-      console.warn('[session-tools] remote.sessionReferenceResolver unavailable; using the local session index')
-    }
-  } catch (error) {
-    console.warn('[session-tools] session candidate lookup failed', error)
-    items = undefined
-  }
-  if (Array.isArray(items)) {
-    for (const item of items) {
-      if (item === null || typeof item !== 'object') continue
-      const summary = summaries[item.sessionId]
-      push(item.sessionId, item.displayTitle ?? item.label, {
-        cwd: item.cwd ?? summary?.cwd,
-        updatedAt: summary?.updatedAt,
-        createdAt: item.createdAt ?? summary?.createdAt,
-      })
-    }
-  }
-
-  // Fallback: the client's own session index, so a missing remote namespace
-  // degrades to ids instead of an empty panel.
-  if (rows.length === 0) {
-    for (const [id, summary] of Object.entries(summaries)) {
-      const usable = summary !== null && typeof summary === 'object' ? summary : {}
-      push(id, usable.title, { cwd: usable.cwd, updatedAt: usable.updatedAt, createdAt: usable.createdAt })
-    }
+  for (const id of snapshot.ids) {
+    const row = snapshot.byId?.[id]
+    if (row === undefined || id === sessionId || row.origin === 'subagent' || row.blank !== false || archived.has(id)) continue
+    const title = typeof row.title === 'string' && row.title.trim() !== ''
+      ? row.title : typeof row.displayTitle === 'string' && row.displayTitle !== '' ? row.displayTitle : t('untitled')
+    const label = title.length <= MAX_ROW_TITLE ? title : `${title.slice(0, MAX_ROW_TITLE)}…`
+    const detail = [title, id, lastSegment(row.cwd), relativeTime(row.updatedAt)]
+      .filter(part => part !== '').join(' · ')
+    rows.push({ id, label, detail })
   }
   return rows
 }
@@ -435,7 +313,7 @@ function reportFillFailure(input: ComposerInput | undefined, reason: string, det
  * Session's composer, leaving any text the user already typed untouched.
  *
  * The chip is what makes the selection visible as a token instead of plain
- * text; its serializer emits a localized target marker (`[目标会话：<title>]` / `[Target session: <title>]`), so the submitted prompt is
+ * text; its serializer emits a localized target marker (`[目标会话：<sessionId>]` / `[Target session: <sessionId>]`), so the submitted prompt is
  * that marker followed by whatever the user typed. When the editor refuses
  * chips, the same marker is appended as plain text after the existing draft.
  * @param ctx - client root context.
@@ -524,7 +402,7 @@ export const name = 'session-tools-client'
 export const inject = ['slots', 'commandUi', 'sessions', 'conversation', 'remote', 'inputTriggers']
 
 /**
- * Register the two browser contributions.
+ * Register the browser contributions.
  * @param ctx - client root context.
  */
 export function apply(ctx: Scope): void {
@@ -555,11 +433,6 @@ export function apply(ctx: Scope): void {
     }, 'session-tools-client: locale dictionaries')
   })
 
-  ctx.slots.inject('conversation.chat.user.before', () => ctx.slots.register({
-    name: 'conversation.chat.user.before',
-    select: selectHandoff,
-  }, HandoffBadge))
-
   // The chip's serializer has to be routable by source name; registering a
   // candidate-less source is the supported way to own one.
   ctx.inject(['inputTriggers'], (scope) => {
@@ -567,7 +440,7 @@ export function apply(ctx: Scope): void {
     typed.effect?.(() => typed.inputTriggers?.registerSource(chipSource), 'session-tools-client: target chip source')
   })
 
-  ctx.inject(['commandUi'], (scope) => {
+  ctx.inject(['commandUi', 'workspaces'], (scope) => {
     const typed = scope as Scope
     // A client-owned command, so this row exists without a Host command
     // behind it and can carry the plugin's own icon and localized label.

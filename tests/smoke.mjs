@@ -3,11 +3,17 @@
  * Run with: node tests/smoke.mjs
  */
 import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+const testRoot = mkdtempSync(join(tmpdir(), 'dsh-session-tools-')).replaceAll('\\', '/')
+for (const path of ['work/new', 'work/inherit', 'projects/alpha', 'projects/alpha-main-2', 'a/tools', 'b/tools', 'session/a']) mkdirSync(`${testRoot}/${path}`, { recursive: true })
+writeFileSync(`${testRoot}/ordinary-file`, 'x')
 // Runs against the built Node half, which is what npm publishes.
 import { apply } from '../lib/index.js'
 
 const records = [
-  { header: { id: 'session-a', createdAt: 1, cwd: '/work/a' } },
+  { header: { id: 'session-a', createdAt: 1, cwd: `${testRoot}/session/a` } },
   { header: { id: 'session-b', createdAt: 2, cwd: '/work/b' } },
   { header: { id: 'session-c', createdAt: 3, cwd: '/work/c' } },
   { header: { id: 'session-dupe-1', createdAt: 4 } },
@@ -19,7 +25,7 @@ const records = [
 /** Surface-event fixtures in the shape `sessionQuery.readSurface` returns. */
 const surfaces = new Map([
   ['session-a', [
-    { type: 'user/message', seq: 0, time: 1000, data: { message: { role: 'user', content: [{ type: 'text', text: '第一条提问' }] } } },
+    { type: 'user/message', seq: 0, time: 1000, data: { role: 'user', content: [{ type: 'text', text: '第一条提问' }] } },
     {
       type: 'assistant/message',
       seq: 1,
@@ -34,7 +40,7 @@ const surfaces = new Map([
     { type: 'tool/call', seq: 2, time: 2500, data: { turn: 0, step: 1, callId: 'c1', name: 'bash', arguments: '{}' } },
     { type: 'tool/result', seq: 3, time: 2600, data: { message: { role: 'tool', content: [{ type: 'text', text: '工具输出' }] } } },
     { type: 'assistant/message', seq: 4, time: 3000, data: { message: { role: 'assistant', content: [{ type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' }] } } },
-    { type: 'user/message', seq: 5, time: 4000, data: { message: { role: 'user', content: [{ type: 'text', text: '[来自会话「session-self」(session-self)]\n\n继续' }] } } },
+    { type: 'user/message', seq: 5, time: 4000, data: { role: 'user', content: [{ type: 'text', text: '[来自会话「session-self」(session-self)]\n\n继续' }] } },
   ]],
   ['session-self', [
     { type: 'assistant/message', seq: 0, time: 500, data: { message: { role: 'assistant', content: [{ type: 'text', text: '自己的回答' }] } } },
@@ -51,6 +57,8 @@ const titles = {
 }
 
 const prompts = []
+let rejectPrompt = false
+let rejectWorkspace = false
 const delivered = []
 const created = []
 const workspaces = []
@@ -61,21 +69,21 @@ const tools = new Map()
 
 /** Directories the fake Workspace registry considers existing. */
 const existingDirs = new Set([
-  'D:/work/new',
-  'D:/work/inherit',
-  '/workspace/projects/alpha',
-  '/workspace/projects/alpha-main-2',
-  'D:/a/tools',
-  'D:/b/tools',
-  '/work/a',
+  `${testRoot}/work/new`,
+  `${testRoot}/work/inherit`,
+  `${testRoot}/projects/alpha`,
+  `${testRoot}/projects/alpha-main-2`,
+  `${testRoot}/a/tools`,
+  `${testRoot}/b/tools`,
+  `${testRoot}/session/a`,
 ])
 
 /** Workspaces the fake registry already knows, as the sidebar would name them. */
 const knownWorkspaces = [
-  { id: 'workspace-known-1', path: '/workspace/projects/alpha', title: '项目甲' },
-  { id: 'workspace-known-2', path: '/workspace/projects/alpha-main-2', title: '项目甲主分支' },
-  { id: 'workspace-known-3', path: 'D:/a/tools', title: 'tools' },
-  { id: 'workspace-known-4', path: 'D:/b/tools', title: 'tools 备用' },
+  { id: 'workspace-known-1', path: `${testRoot}/projects/alpha`, title: '项目甲' },
+  { id: 'workspace-known-2', path: `${testRoot}/projects/alpha-main-2`, title: '项目甲主分支' },
+  { id: 'workspace-known-3', path: `${testRoot}/a/tools`, title: 'tools' },
+  { id: 'workspace-known-4', path: `${testRoot}/b/tools`, title: 'tools 备用' },
 ]
 
 /** Agent presets the fake roster lists, in registry order. */
@@ -127,6 +135,7 @@ const ctx = {
     if (service === 'workspaceRegistry') {
       return {
         create: async cwd => {
+          if (rejectWorkspace) throw new Error('write failed')
           workspaces.push(cwd)
           return { id: `workspace-${workspaces.length}` }
         },
@@ -165,6 +174,7 @@ const ctx = {
   sessionController: {
     prompt: async request => {
       prompts.push(request)
+      if (rejectPrompt) throw new Error('transport unavailable')
       return { accepted: true }
     },
     create: async options => {
@@ -175,7 +185,7 @@ const ctx = {
       default: { provider: 'remote-magpie/deepseek', model: 'deepseek-v5', reasoningEffort: 'medium' },
       routableProviders: ['remote-magpie/deepseek', 'remote-magpie/zhipu', 'alibaba/qwen'],
       groups: [
-        { id: 'remote-magpie/deepseek', name: 'DeepSeek', models: [{ id: 'deepseek-v5', name: 'DeepSeek V5' }] },
+        { id: 'remote-magpie/deepseek', name: 'DeepSeek', models: [{ id: 'deepseek-v5', name: 'DeepSeek V5', reasoning: { efforts: [{ id: 'medium' }] } }] },
         {
           id: 'remote-magpie/zhipu',
           name: 'Zhipu',
@@ -275,20 +285,24 @@ assert.equal(
   + '[回报方式：完成后用 session_send 把结果发给「session-self」(session-self)。发完即结束，不要等待或轮询。]',
 )
 
-// send hot: a loaded Agent receives a handoff source through its inbox
+// Both hot and cold targets use host prompt admission.
 liveAgents.set('session-c', liveAgent('session-c'))
 const hot = await send.execute({ target: '发布检查', message: '热投递' }, exec('call-hot'))
-assert.equal(hot.delivery, 'relay')
-assert.equal(delivered.at(-1).id, 'session-c')
-assert.equal(delivered.at(-1).mode, 'queue')
-assert.equal(delivered.at(-1).message.source.kind, 'session-handoff')
-assert.equal(delivered.at(-1).message.source.form, 'relay')
-assert.equal(delivered.at(-1).message.source.senderSessionId, 'session-self')
-assert.match(delivered.at(-1).message.content[0].text, /热投递$/)
+assert.equal(hot.delivery, 'user')
+assert.equal(hot.status, 'accepted')
+assert.equal(prompts.at(-1).sessionId, 'session-c')
+await send.execute({ target: 'session-c', message: '下一步', mode: 'steer' }, exec('call-hot-steer'))
+assert.equal(prompts.at(-1).mode, 'steer')
 
-// send hot: steer mode reaches the Agent's steering lane
-await send.execute({ target: 'session-c', message: '打断一下', mode: 'steer' }, exec('call-hot-steer'))
-assert.equal(delivered.at(-1).mode, 'steer')
+// An uncertain admission returns the stable id; retry reuses it.
+rejectPrompt = true
+const uncertain = await send.execute({ target: 'session-a', message: 'retry me' }, exec('call-uncertain'))
+assert.equal(uncertain.status, 'unknown')
+assert.equal(uncertain.accepted, false)
+rejectPrompt = false
+const retry = await send.execute({ target: 'session-a', message: 'retry me', requestId: uncertain.requestId }, exec('call-retry'))
+assert.equal(retry.status, 'accepted')
+assert.equal(prompts.at(-1).requestId, uncertain.requestId)
 
 // send: ambiguous title reports candidates
 await assert.rejects(
@@ -312,21 +326,19 @@ await assert.rejects(send.execute({ target: 'session-a', message: 'x', mode: 'no
 // create: registers the directory as a Workspace, names the Session, and hands it the message
 liveAgents.set('session-new-1', liveAgent('session-new-1'))
 const made = await create.execute({
-  cwd: 'D:/work/new',
+  cwd: `${testRoot}/work/new`,
   title: '新任务',
   message: '开工',
 }, exec('call-create'))
 assert.equal(made.sessionId, 'session-new-1')
 assert.equal(made.title, '新任务')
-assert.equal(made.cwd, 'D:/work/new')
+assert.equal(made.cwd, `${testRoot}/work/new`)
 assert.equal(made.delivered, true)
-assert.deepEqual(workspaces, ['D:/work/new'])
+assert.deepEqual(workspaces, [`${testRoot}/work/new`])
 assert.deepEqual(created.at(-1), { workspaceId: 'workspace-1' })
 assert.deepEqual(renamed.at(-1), { id: 'session-new-1', title: '新任务' })
-assert.equal(delivered.at(-1).id, 'session-new-1')
-assert.equal(delivered.at(-1).message.source.kind, 'session-handoff')
-assert.equal(delivered.at(-1).message.source.senderSessionId, 'session-self')
-assert.match(delivered.at(-1).message.content[0].text, /^\[来自会话「session-self」\(session-self\)\]\n\n开工$/)
+assert.equal(prompts.at(-1).sessionId, 'session-new-1')
+assert.match(prompts.at(-1).content[0].text, /^\[来自会话「session-self」\(session-self\)\]\n\n开工$/)
 
 // create: a blank creation is refused, because such a Session never reaches the sidebar
 await assert.rejects(
@@ -348,17 +360,17 @@ liveAgents.set('session-new-3', liveAgent('session-new-3'))
 const reporting = await create.execute({ title: '回报任务', message: '做完告诉我', reply: true }, exec('call-create-reply'))
 assert.equal(reporting.sessionId, 'session-new-3')
 assert.equal(reporting.delivered, true)
-assert.match(delivered.at(-1).message.content[0].text, /^\[来自会话「session-self」\(session-self\)\]\n\n做完告诉我/)
-assert.match(delivered.at(-1).message.content[0].text, /回报方式：完成后用 session_send 把结果发给「session-self」\(session-self\)/)
+assert.match(prompts.at(-1).content[0].text, /^\[来自会话「session-self」\(session-self\)\]\n\n做完告诉我/)
+assert.match(prompts.at(-1).content[0].text, /回报方式：完成后用 session_send 把结果发给「session-self」\(session-self\)/)
 
 // create: an omitted cwd inherits the calling Session directory, not the profile
 liveAgents.set('session-new-4', liveAgent('session-new-4'))
 const inherited = await create.execute({ title: '继承目录', message: '开工' }, {
   callId: 'call-create-inherit',
   signal: new AbortController().signal,
-  agent: { session: { id: 'session-self', header: { cwd: 'D:/work/inherit' } } },
+  agent: { session: { id: 'session-self', header: { cwd: `${testRoot}/work/inherit` } } },
 })
-assert.equal(inherited.cwd, 'D:/work/inherit')
+assert.equal(inherited.cwd, `${testRoot}/work/inherit`)
 assert.deepEqual(created.at(-1), { workspaceId: 'workspace-2' })
 
 // read: projects only text-bearing user and assistant rows, oldest first
@@ -394,27 +406,37 @@ await assert.rejects(read.execute({ target: '不存在的会话' }, exec()), /No
 await assert.rejects(read.execute({ target: '新对话' }, exec()), /matches 2 Sessions/)
 await assert.rejects(read.execute({ target: '实现计划' }, exec()), /Cannot read Session "实现计划"/)
 
+// A file is rejected before creating a Workspace or Session.
+const beforeInvalid = created.length
+await assert.rejects(create.execute({ cwd: `${testRoot}/ordinary-file`, message: 'x' }, exec('call-file')), /not a directory/)
+assert.equal(created.length, beforeInvalid)
+
+rejectWorkspace = true
+await assert.rejects(create.execute({ cwd: `${testRoot}/work/new`, message: 'x' }, exec('call-workspace-failure')), /Cannot register Workspace.*write failed/)
+assert.equal(created.length, beforeInvalid)
+rejectWorkspace = false
+
 // create: a spoken Workspace title resolves to its directory
 const spoken = await create.execute({ cwd: '项目甲', title: '称谓建会话', message: '开工' }, exec('call-create-spoken'))
-assert.equal(spoken.cwd, '/workspace/projects/alpha')
-assert.equal(workspaces.at(-1), '/workspace/projects/alpha')
+assert.equal(spoken.cwd, `${testRoot}/projects/alpha`)
+assert.equal(workspaces.at(-1), `${testRoot}/projects/alpha`)
 
 // create: a directory last segment resolves even when the user names it without the title
 const bySegment = await create.execute({ cwd: 'alpha main 2', title: '尾段建会话', message: '开工' }, exec('call-create-segment'))
-assert.equal(bySegment.cwd, '/workspace/projects/alpha-main-2')
+assert.equal(bySegment.cwd, `${testRoot}/projects/alpha-main-2`)
 
 // create: a multi-segment suffix resolves against the known path
 const bySuffix = await create.execute({ cwd: 'projects/alpha', title: '后缀建会话', message: '开工' }, exec('call-create-suffix'))
-assert.equal(bySuffix.cwd, '/workspace/projects/alpha')
+assert.equal(bySuffix.cwd, `${testRoot}/projects/alpha`)
 
 // create: a Session title the user named resolves to that Session's directory
 const bySession = await create.execute({ cwd: '研究记录', title: '会话名建会话', message: '开工' }, exec('call-create-by-session'))
-assert.equal(bySession.cwd, '/work/a')
+assert.equal(bySession.cwd, `${testRoot}/session/a`)
 
 // create: an ambiguous name reports candidates instead of guessing
 await assert.rejects(
   create.execute({ cwd: 'tools', title: '歧义', message: '开工' }, exec('call-create-ambiguous')),
-  /matches 2 known directories: D:\/a\/tools, D:\/b\/tools/,
+  /matches 2 known directories:/,
 )
 
 // create: an unknown name lists what the Host knows and offers the inherited directory
@@ -422,18 +444,18 @@ await assert.rejects(
   create.execute({ cwd: '不存在的项目', message: '开工' }, {
     callId: 'call-create-missing',
     signal: new AbortController().signal,
-    agent: { session: { id: 'session-self', header: { cwd: 'D:/work/inherit' } } },
+    agent: { session: { id: 'session-self', header: { cwd: `${testRoot}/work/inherit` } } },
   }),
-  /is neither an existing directory nor a known Workspace or Session directory.*Known directories:.*Omit cwd to use the calling Session directory \(D:\/work\/inherit\)/s,
+  /is neither an existing directory nor a known Workspace or Session directory.*Known directories:.*Omit cwd/s,
 )
 
 // create: an existing relative directory still wins without any name matching
 const relative = await create.execute({ cwd: 'inherit', title: '相对路径', message: '开工' }, {
   callId: 'call-create-relative',
   signal: new AbortController().signal,
-  agent: { session: { id: 'session-self', header: { cwd: 'D:/work' } } },
+  agent: { session: { id: 'session-self', header: { cwd: `${testRoot}/work` } } },
 })
-assert.equal(relative.cwd, 'D:/work/inherit')
+assert.equal(relative.cwd, `${testRoot}/work/inherit`)
 assert.equal(relative.delivered, true)
 
 // create: a named model is validated, recorded on the new Session, and echoed back
@@ -452,13 +474,19 @@ assert.deepEqual(selections.at(-1), {
   selection: { provider: 'remote-magpie/zhipu', model: 'glm-5.3', reasoningEffort: 'high' },
 })
 // the selection is recorded before the first message is delivered
-assert.equal(delivered.at(-1).id, 'session-new-10')
+assert.equal(prompts.at(-1).sessionId, 'session-new-10')
 
 // create: a model without reasoning efforts still accepts a bare route
 liveAgents.set('session-new-11', liveAgent('session-new-11'))
 const flash = await create.execute({ message: '快跑', provider: 'remote-magpie/zhipu', model: 'glm-5.3-flash' }, exec('call-create-flash'))
 assert.equal(flash.model, 'remote-magpie/zhipu/glm-5.3-flash')
 assert.deepEqual(selections.at(-1).selection, { provider: 'remote-magpie/zhipu', model: 'glm-5.3-flash' })
+
+// A model without reasoning options rejects an explicit effort before creation.
+await assert.rejects(
+  create.execute({ message: 'x', provider: 'remote-magpie/zhipu', model: 'glm-5.3-flash', reasoningEffort: 'high' }, exec('call-no-effort')),
+  /Supported efforts: \(none\)/,
+)
 
 // create: an unsupported reasoning effort is rejected before anything is created
 const createdBeforeModels = created.length
@@ -583,5 +611,17 @@ const defaultedPreset = await create.execute({ message: '开工' }, exec('call-c
 assert.equal(defaultedPreset.delivered, true)
 assert.equal('agentPreset' in created.at(-1), false)
 
+
+// Recovery retains the created Session ID and its admission request ID.
+rejectPrompt = true
+const uncertainCreate = await create.execute({ message: 'recover first message' }, exec('create-uncertain'))
+assert.equal(uncertainCreate.status, 'unknown')
+assert.equal(uncertainCreate.delivered, false)
+records.push({ header: { id: uncertainCreate.sessionId, createdAt: 100 } })
+rejectPrompt = false
+const recovered = await send.execute({ target: uncertainCreate.sessionId, message: 'recover first message', requestId: uncertainCreate.requestId }, exec('create-recovery'))
+assert.equal(recovered.status, 'accepted')
+assert.equal(prompts.at(-1).requestId, uncertainCreate.requestId)
+assert.equal(prompts.at(-1).sessionId, uncertainCreate.sessionId)
 
 console.log('smoke: all assertions passed')

@@ -3,8 +3,8 @@
  * to another Session, or move separate work into a new Session.
  *
  * Delivery goes through the Session controller's `prompt` method, so it reuses
- * the same admission path as the Web client: durable inbox append, request
- * deduplication by `requestId`, and explicit resume of a cold Session.
+ * the same admission path as the Web client: request deduplication by
+ * `requestId` and explicit resume of a cold Session. Acceptance is not persistence.
  *
  * @module dsh-session-tools
  */
@@ -61,7 +61,7 @@ const READ_ROLES = ['user', 'assistant'] as const
 type ReadRole = (typeof READ_ROLES)[number]
 
 const LIST_DESCRIPTION = [
-  'List Sessions this Session may message.',
+  'Discover Sessions, excluding the calling Session. Archived and delegated Sessions are included and marked, but cannot be messaged; blank Sessions may be listed and addressed by ID.',
   'Returns sessionId, title, working directory, creation time, and whether the target is archived or a delegated subagent.',
   'Use it to resolve a conversation the user names in prose before calling session_send.',
 ].join(' ')
@@ -78,13 +78,17 @@ const PRESETS_DESCRIPTION = [
   'An empty roster means this deployment composes no Agent presets; omit agentPreset then.',
 ].join(' ')
 
+const HANDOFF_RESPONSE = 'Run routine lookups and delivery without announcing each step. If the user only requested a handoff and it was accepted, respond in one short sentence in the user’s language. Do not repeat the task text, IDs, model settings, or receipt fields unless the user asks. Explain failures, uncertain delivery, or work you actually performed when relevant.'
+
 const SEND_DESCRIPTION = [
   'Send one message to another Session and let it run on its own.',
   'The message enters that Session as a user message and may start a new turn there, so delivery is not execution confirmation.',
   'One-way by default. Set reply to true when you need the result: the delivered text then tells the target how to send its answer back to you.',
   'Never read or poll the target afterwards. A delivered message ends your part whether or not it answers. An answer reaches you the same way, as a message from another Session, so there is nothing to watch for.',
-  'When the prompt opens with a target marker the user picked in the composer — `[目标会话：<title>]` on a Chinese interface, `[Target session: <title>]` on an English one — that Session is the target and the rest of the prompt is an INSTRUCTION about what to send: compose the message yourself (including asking for a report when the user wants one) instead of forwarding the instruction verbatim. A marker naming an untitled Session carries its sessionId instead of a title, which you may pass to target directly.',
+  'When the prompt opens with a target marker the user picked in the composer — `[目标会话：<sessionId>]` on a Chinese interface, `[Target session: <sessionId>]` on an English one — that Session is the target and the rest of the prompt is an INSTRUCTION about what to send: compose the message yourself (including asking for a report when the user wants one) instead of forwarding the instruction verbatim. Pass the sessionId in the marker directly as target.',
+  'For status unknown, retry with the returned requestId and the same target, message, mode and reply. Do not create a new request id for a retry. Accepted confirms admission; persisted additionally confirms a host durability checkpoint. Neither reports execution.',
   'Pass target as a Session id or an exact Session title; an ambiguous title is rejected with candidates to choose from.',
+  HANDOFF_RESPONSE,
 ].join(' ')
 
 const CREATE_DESCRIPTION = [
@@ -95,7 +99,10 @@ const CREATE_DESCRIPTION = [
   'Pass provider and model together when the user names a model for the new Session ("open one with glm5.3"): call session_models first to resolve what they said against the exact provider and model ids. An unavailable route fails before anything is created, with the full model catalog attached so you can retry with the exact id. reasoningEffort is optional and must be one the model supports; when omitted, the Session reuses the effort you last selected manually for the same model (the Host default selection), else the model provider\'s recommended default effort.',
   'agentPreset optionally names the Agent preset the new Session runs: pass the exact id, or the name the user called the preset by ("the coding preset"). A name is matched against the roster\'s display names, several matches list the candidates, and a miss fails with the full roster attached before anything is created; call session_presets to see the ids and names first. Omit to use the configured default preset.',
   'The new Session joins the Workspace registered at its directory.',
+  'If delivery status is unknown, do not create another Session: call session_send with the returned sessionId and requestId and the same message and reply.',
+  'If status is setup_failed, the Session was created but no message was submitted. Tell the user which Session exists and what needs fixing before sending to it.',
   'Set reply to true when the new Session should send its result back to you when it finishes.',
+  HANDOFF_RESPONSE,
 ].join(' ')
 
 const READ_DESCRIPTION = [
@@ -207,11 +214,13 @@ interface HandoffOptions {
 
 /** Delivery inputs shared by `session_send` and `session_create`. */
 interface DeliveryOptions {
-  readonly senderId?: string
-  readonly senderTitle?: string
   readonly mode: 'queue' | 'steer'
   readonly requestId: string
 }
+
+type DeliveryReceipt =
+  | { readonly accepted: true; readonly persisted: boolean; readonly status: 'accepted' }
+  | { readonly accepted: false; readonly persisted: false; readonly status: 'unknown' }
 
 type Resolution =
   | { readonly kind: 'found'; readonly record: SessionRecordLike }
@@ -448,8 +457,9 @@ export function apply(ctx: Context): void {
         mode: {
           type: 'string',
           enum: ['queue', 'steer'],
-          description: 'queue (default) appends the message after the target Session finishes its current work; steer interrupts its running turn.',
+          description: 'queue (default) queues the message for the next turn; steer adds it at the next step of the running turn.',
         },
+        requestId: { type: 'string', description: 'Reuse the exact requestId returned by an unknown delivery to retry the same handoff. Omit for a new handoff.' },
         reply: {
           type: 'boolean',
           description: 'Ask the target to send its result back to the calling Session when it finishes. Off by default, which makes the message one-way.',
@@ -467,8 +477,11 @@ export function apply(ctx: Context): void {
           mode: { type: 'string' },
           delivery: { type: 'string', enum: ['relay', 'user'] },
           accepted: { type: 'boolean' },
+          persisted: { type: 'boolean' },
+          requestId: { type: 'string' },
+          status: { type: 'string', enum: ['accepted', 'unknown'] },
         },
-        required: ['sessionId', 'title', 'mode', 'delivery', 'accepted'],
+        required: ['sessionId', 'title', 'mode', 'delivery', 'accepted', 'persisted', 'requestId', 'status'],
         additionalProperties: false,
       },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
@@ -483,11 +496,11 @@ export function apply(ctx: Context): void {
     }),
     presentResult: (args, result) => result.isError ? undefined : {
       card: 'generic',
-      title: `已向「${String((args as { target?: unknown })?.target)}」发送消息`,
+      title: `会话交接结果「${String((args as { target?: unknown })?.target)}」`,
       content: [{ type: 'text', text: String((args as { message?: unknown })?.message) }],
     },
     async execute(args, exec) {
-      const input = args as { target?: unknown, message?: unknown, mode?: unknown, reply?: unknown }
+      const input = args as { target?: unknown, message?: unknown, mode?: unknown, reply?: unknown, requestId?: unknown }
       const target = typeof input.target === 'string' ? input.target.trim() : ''
       const message = typeof input.message === 'string' ? input.message.trim() : ''
       if (target === '') throw new Error('session_send requires a non-empty target')
@@ -504,7 +517,11 @@ export function apply(ctx: Context): void {
       if (self === target) {
         throw new Error('session_send cannot target the Session that is calling it')
       }
-      const resolution = resolveTarget(records, labels, target, self)
+      const recoveryAgent = typeof input.requestId === 'string' && input.requestId.startsWith('session-create:')
+        && input.requestId.endsWith(`:${target}`) ? ctx.agents.get(target as never) : undefined
+      const recoveryHeader = recoveryAgent?.session.header as SessionHeaderLike | undefined
+      const resolution = resolveTarget(recoveryHeader === undefined || records.some(record => record.header.id === target)
+        ? records : [...records, { header: recoveryHeader }], labels, target, self)
 
       if (resolution.kind === 'self') {
         throw new Error('session_send cannot target the Session that is calling it')
@@ -539,13 +556,9 @@ export function apply(ctx: Context): void {
         ...(senderTitle === undefined ? {} : { senderTitle }),
         reply: input.reply === true,
       })
-      const delivery = await deliverToSession(ctx, facts, header.id, body, {
-        ...(senderId === undefined ? {} : { senderId }),
-        ...(senderTitle === undefined ? {} : { senderTitle }),
-        mode,
-        requestId: `session-send:${facts.callId}:${header.id}`,
-      })
-      return { sessionId: header.id, title, mode, delivery, accepted: true }
+      const requestId = typeof input.requestId === 'string' && input.requestId.trim() !== '' ? input.requestId.trim() : `session-send:${facts.callId}:${header.id}`
+      const receipt = await deliverToSession(ctx, facts, header.id, body, { mode, requestId })
+      return { sessionId: header.id, title, mode, delivery: 'user', requestId, ...receipt }
     },
   })
 
@@ -607,8 +620,12 @@ export function apply(ctx: Context): void {
             description: 'Preset id the new Session runs, when the caller named a preset; a spoken name is reported as its resolved id.',
           },
           delivered: { type: 'boolean' },
+          persisted: { type: 'boolean' },
+          requestId: { type: 'string' },
+          status: { type: 'string', enum: ['accepted', 'unknown', 'setup_failed'] },
+          failure: { type: 'string' },
         },
-        required: ['sessionId', 'delivered'],
+        required: ['sessionId', 'delivered', 'persisted', 'requestId', 'status'],
         additionalProperties: false,
       },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
@@ -674,6 +691,18 @@ export function apply(ctx: Context): void {
       const cwd = requested !== ''
         ? await resolveCreateDirectory(ctx, facts, requested)
         : facts.agent?.session?.header?.cwd
+      if (cwd !== undefined && requested === '' && !await directoryExists(cwd)) {
+        throw new Error(`Session directory "${cwd}" does not exist`)
+      }
+      const records = await ctx.sessionQuery.listSessions(facts.signal) as readonly SessionRecordLike[]
+      const labels = projectedTitles(ctx, records)
+      const senderId = facts.agent?.session?.id
+      const senderTitle = senderId === undefined ? undefined : labels.get(senderId) ?? senderId
+      const body = withHandoffEnvelope(message, {
+        ...(senderId === undefined ? {} : { senderId }),
+        ...(senderTitle === undefined ? {} : { senderTitle }),
+        reply: input.reply === true,
+      })
       // Register the directory as a Workspace before creating the Session, so
       // the new Session joins that Workspace and appears in the sidebar. A
       // Session created with a bare `cwd` belongs to no Workspace and stays
@@ -683,34 +712,40 @@ export function apply(ctx: Context): void {
       if (cwd !== undefined && registry !== undefined) {
         try {
           workspaceId = (await registry.create(cwd)).id
-        } catch {
-          // A path that is not a directory falls back to the plain cwd branch.
-          workspaceId = undefined
+        } catch (error: unknown) {
+          throw new Error(`Cannot register Workspace for "${cwd}": ${error instanceof Error ? error.message : String(error)}`)
         }
       }
       const created = await ctx.sessionController.create({
         ...(workspaceId === undefined ? (cwd === undefined ? {} : { cwd }) : { workspaceId: workspaceId as never }),
         ...(agentPreset === undefined ? {} : { agentPreset }),
       })
+      const requestId = `session-create:${facts.callId}:${created.sessionId}`
       const agent = ctx.agents.get(created.sessionId)
       // The selection is recorded before the first message is delivered, so the
       // handoff's opening model turn already runs on the requested route, and
       // it appends only this Session's `model/selection` event — never the
       // Host-wide default the GUI selector saves alongside a manual switch.
       if (route !== undefined) {
-        if (agent === undefined) {
-          throw new Error(
-            `session_create found no live Agent for the new Session "${created.sessionId}", `
-            + 'so its model selection cannot be applied; nothing was delivered',
-          )
+        try {
+          if (agent === undefined) throw new Error('No live Agent is available to apply the requested model')
+          agent.model.select(route.reasoningEffort === undefined
+            ? { provider: route.provider, model: route.model }
+            : {
+              provider: route.provider,
+              model: route.model,
+              reasoningEffort: route.reasoningEffort as Exclude<ModelSelection['reasoningEffort'], undefined>,
+            })
+        } catch (error: unknown) {
+          return {
+            sessionId: created.sessionId,
+            delivered: false,
+            persisted: false,
+            requestId,
+            status: 'setup_failed',
+            failure: `Cannot apply the requested model: ${error instanceof Error ? error.message : String(error)}`,
+          }
         }
-        agent.model.select(route.reasoningEffort === undefined
-          ? { provider: route.provider, model: route.model }
-          : {
-            provider: route.provider,
-            model: route.model,
-            reasoningEffort: route.reasoningEffort as Exclude<ModelSelection['reasoningEffort'], undefined>,
-          })
       }
       const title = typeof input.title === 'string' && input.title.trim() !== ''
         ? input.title.trim()
@@ -723,21 +758,7 @@ export function apply(ctx: Context): void {
         }
       }
 
-      const records = await ctx.sessionQuery.listSessions(facts.signal) as readonly SessionRecordLike[]
-      const labels = projectedTitles(ctx, records)
-      const senderId = facts.agent?.session?.id
-      const senderTitle = senderId === undefined ? undefined : labels.get(senderId) ?? senderId
-      const body = withHandoffEnvelope(message, {
-        ...(senderId === undefined ? {} : { senderId }),
-        ...(senderTitle === undefined ? {} : { senderTitle }),
-        reply: input.reply === true,
-      })
-      await deliverToSession(ctx, facts, created.sessionId, body, {
-        ...(senderId === undefined ? {} : { senderId }),
-        ...(senderTitle === undefined ? {} : { senderTitle }),
-        mode: 'queue',
-        requestId: `session-create:${facts.callId}:${created.sessionId}`,
-      })
+      const receipt = await deliverToSession(ctx, facts, created.sessionId, body, { mode: 'queue', requestId })
 
       return {
         sessionId: created.sessionId,
@@ -745,7 +766,7 @@ export function apply(ctx: Context): void {
         ...(cwd === undefined ? {} : { cwd }),
         ...(route === undefined ? {} : { model: describeModelRoute(route) }),
         ...(agentPreset === undefined ? {} : { preset: agentPreset }),
-        delivered: true,
+        delivered: receipt.accepted, persisted: receipt.persisted, requestId, status: receipt.status,
       }
     },
   })
@@ -936,11 +957,11 @@ async function resolveModelRoute(ctx: Context, route: ModelRoute): Promise<Model
     )
   }
   const efforts = entry.reasoning?.efforts
-  if (route.reasoningEffort !== undefined && efforts !== undefined
-    && !efforts.some(candidate => candidate.id === route.reasoningEffort)) {
+  if (route.reasoningEffort !== undefined
+    && !efforts?.some(candidate => candidate.id === route.reasoningEffort)) {
     throw new Error(
       `reasoning effort "${route.reasoningEffort}" is not supported by "${route.provider}/${route.model}". `
-      + `Supported efforts: ${efforts.map(candidate => candidate.id).join(', ')}.`,
+      + `Supported efforts: ${efforts?.map(candidate => candidate.id).join(', ') || '(none)'}.`,
     )
   }
   if (route.reasoningEffort !== undefined) return route
@@ -948,6 +969,9 @@ async function resolveModelRoute(ctx: Context, route: ModelRoute): Promise<Model
     ? catalog.default.reasoningEffort
     : undefined
   const effort = fromDefault ?? entry.reasoning?.defaultEffort
+  if (effort !== undefined && !efforts?.some(candidate => candidate.id === effort)) {
+    throw new Error(`reasoning effort "${effort}" is not supported by "${route.provider}/${route.model}". Supported efforts: ${efforts?.map(candidate => candidate.id).join(', ') || '(none)'}.`)
+  }
   return effort === undefined ? route : { ...route, reasoningEffort: effort }
 }
 
@@ -1128,7 +1152,7 @@ function resolveDirectory(exec: ExecLike, value: string): string {
  */
 async function resolveCreateDirectory(ctx: Context, exec: ExecLike, requested: string): Promise<string> {
   const direct = resolveDirectory(exec, requested)
-  if (await directoryExists(ctx, direct)) return direct
+  if (await directoryExists(direct)) return direct
 
   const known = await knownDirectories(ctx, exec)
   const paths: string[] = []
@@ -1144,7 +1168,7 @@ async function resolveCreateDirectory(ctx: Context, exec: ExecLike, requested: s
     )
   }
   const only = paths[0]
-  if (only !== undefined && await directoryExists(ctx, only)) return only
+  if (only !== undefined && await directoryExists(only)) return only
 
   const inherited = exec.agent?.session?.header?.cwd
   throw new Error(
@@ -1159,26 +1183,18 @@ async function resolveCreateDirectory(ctx: Context, exec: ExecLike, requested: s
 /**
  * Whether a path currently names a directory.
  *
- * The Workspace registry answers without touching the filesystem layout this
- * plugin does not own; a profile without that service falls back to `stat`.
- * @param ctx - Host context.
+ * Filesystem metadata distinguishes a directory from an ordinary file.
  * @param path - candidate directory.
  * @returns whether the directory exists.
  */
-async function directoryExists(ctx: Context, path: string): Promise<boolean> {
-  const registry = ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
-  if (typeof registry?.resolveByPath === 'function') {
-    try {
-      await registry.resolveByPath(path)
-      return true
-    } catch {
-      return false
-    }
-  }
+async function directoryExists(path: string): Promise<boolean> {
   try {
-    return (await stat(path)).isDirectory()
-  } catch {
-    return false
+    const info = await stat(path)
+    if (!info.isDirectory()) throw new Error(`Session directory "${path}" is not a directory`)
+    return true
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error as NodeJS.ErrnoException).code === 'ENOTDIR') return false
+    throw error
   }
 }
 
@@ -1297,16 +1313,13 @@ function withHandoffEnvelope(message: string, options: HandoffOptions): string {
 /**
  * Deliver one message to the target Session.
  *
- * A live Agent receives it through its inbox with a `session-handoff` source,
- * which lets the Client decorate the row with the sending Session. A cold
- * Session has no live Agent to address, so the message falls back to the
- * Session controller's prompt path with an ordinary user source.
+ * The Session controller admits both hot and cold prompts with the same id.
  * @param ctx - Host context.
  * @param exec - tool execution facts.
  * @param targetSessionId - Session that receives the message.
  * @param body - model-facing text to deliver.
- * @param options - sender identity, delivery mode, and prompt request id.
- * @returns which source the delivered message carries.
+ * @param options - delivery mode and prompt request id.
+ * @returns admission state and whether a durability checkpoint is confirmed.
  */
 async function deliverToSession(
   ctx: Context,
@@ -1314,34 +1327,27 @@ async function deliverToSession(
   targetSessionId: string,
   body: string,
   options: DeliveryOptions,
-): Promise<'relay' | 'user'> {
-  const live = ctx.agents.get(targetSessionId as never)
-  if (live !== undefined) {
-    const message = {
-      id: globalThis.crypto.randomUUID(),
-      role: 'user',
+): Promise<DeliveryReceipt> {
+  try {
+    await ctx.sessionController.prompt({
+      requestId: options.requestId as never,
+      sessionId: targetSessionId as never,
+      mode: options.mode,
       content: [{ type: 'text', text: body }],
-      source: {
-        kind: 'session-handoff',
-        form: 'relay',
-        ...(options.senderId === undefined ? {} : { senderSessionId: options.senderId }),
-        ...(options.senderTitle === undefined ? {} : { senderTitle: options.senderTitle }),
-      },
-    }
-    if (options.mode === 'steer') live.steer(message as never)
-    else live.followup(message as never)
-    const flushed = await ctx.sessions.flush(live.session)
-    if (!flushed) throw new Error('Session persistence did not acknowledge the delivered message')
-    return 'relay'
+    }, exec.signal)
+  } catch {
+    return { accepted: false, persisted: false, status: 'unknown' }
   }
-
-  await ctx.sessionController.prompt({
-    requestId: options.requestId as never,
-    sessionId: targetSessionId as never,
-    mode: options.mode,
-    content: [{ type: 'text', text: body }],
-  }, exec.signal)
-  return 'user'
+  const agent = ctx.agents.get(targetSessionId as never)
+  let persisted = false
+  if (agent !== undefined) {
+    try {
+      persisted = await ctx.sessions.flush(agent.session)
+    } catch {
+      persisted = false
+    }
+  }
+  return { accepted: true, persisted, status: 'accepted' }
 }
 
 /**
@@ -1521,8 +1527,8 @@ function messageRole(event: { readonly type?: unknown }): ReadRole | undefined {
  * @returns trimmed text, or an empty string when the row carries none.
  */
 function eventText(event: { readonly data?: unknown }): string {
-  const data = event?.data as { message?: { content?: unknown } } | undefined
-  const content = data?.message?.content
+  const data = event?.data as { content?: unknown, message?: { content?: unknown } } | undefined
+  const content = data?.content ?? data?.message?.content
   if (!Array.isArray(content)) return ''
   const parts: string[] = []
   for (const block of content) {

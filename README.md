@@ -10,7 +10,7 @@ A dsh plugin that gives the model **six cross-Session tools** and gives you a **
 - `session_send` — hand one message to that Session; one-way delivery, **sending ends your part**, `reply: true` asks it to send the result back
 - `session_read` — read a Session's recent user / assistant messages, only when you explicitly ask to see them
 - `session_create` — create a Session (directory / title / Agent preset / optional model route) and hand it a first message
-- **Session message** (`/` menu, with icon) — pick a Session and a **Session chip** (same rendering as an `@` reference) is inserted into the composer. What you type next is an **instruction for the model**: the chip serializes to `[Target session: <title>]` on submit (`[目标会话：<title>]` on a Chinese interface), and the model composes the real message and calls `session_send`
+- **Session message** (`/` menu, with icon) — pick a Session and a **Session chip** (same rendering as an `@` reference) is inserted into the composer. What you type next is an **instruction for the model**: the chip serializes to `[Target session: <sessionId>]` on submit (`[目标会话：<sessionId>]` on a Chinese interface), and the model composes the real message and calls `session_send`
 
 There is deliberately **no verbatim-delivery command**: to send text unchanged, just say it in that Session yourself.
 
@@ -61,10 +61,7 @@ When the result matters, set `reply: true`. The plugin then appends a return add
 
 The receiving model sends its answer back with `session_send`; it arrives in the originating conversation as an ordinary message from another Session. Neither side reads or polls the other.
 
-Two delivery paths, chosen automatically:
-
-- **Live Session** — the loaded Agent receives the message through its inbox with `source.kind = 'session-handoff'`, so the Web client decorates the row with *Message from …* (*收到消息，来自 …* on a Chinese interface). `ctx.sessions.flush` confirms persistence before the tool returns.
-- **Cold Session** — no Agent to address, so the message goes through `ctx.sessionController.prompt` (an ordinary `user` source). The message still lands and resumes the Session; only the source badge is absent.
+Both live and cold Sessions use the Host's `prompt` admission with a stable request ID. `accepted` confirms admission. `persisted: true` also confirms that the Host acknowledged a durability checkpoint. After an `unknown` result, retry the same target and message with the returned `requestId`. Reuse the returned Session ID after an unconfirmed first delivery. If creation returns `setup_failed`, fix the reported setup issue before submitting the first message. The Host recovers recorded request IDs from its event history. Deduplication after a process crash depends on the request having reached durable storage. The ordinary user message includes the sender's identity in its text.
 
 ## The Session message flow
 
@@ -72,7 +69,7 @@ Two delivery paths, chosen automatically:
 2. Pick a Session from the list (searchable; each row shows the directory tail and relative activity time).
 3. A Session chip is inserted **at the caret without overwriting** anything you already typed.
 4. Type your instruction — e.g. *"sync the API change to it and have it regenerate the docs"*.
-5. On submit the chip becomes `[Target session: <title>]`; the model reads the marker, composes the actual message, and calls `session_send`.
+5. On submit the chip becomes `[Target session: <sessionId>]`; the model reads the marker, composes the actual message, and calls `session_send`.
 
 The marker is deliberately **not** `@[label](dsh-session:…)`: that URI is what makes the built-in `session-reference` plugin inject a read-only snapshot of the target. The bracket marker is plain context, so no Session content is ever read behind your back.
 
@@ -86,13 +83,13 @@ The package has **no runtime dependencies**: every `@deepseek-ai/*` import is ty
 
 ## Configuration
 
-None. The plugin registers its six tools and two browser contributions and reads no configuration.
+None. All six tools and browser features load with the plugin.
 
 ## Implementation notes
 
 - **Titles** come from Session projections (`sessionProjections`, with the optional `sessionProjectionCache` for cold rows) — no log folding, so listing stays cheap.
 - **Archived / delegated** state comes from `workspaceRegistry.archivedSessionIds` and the Session header's `origin`.
-- **Creating a Session** resolves `cwd` to an existing directory first (`workspaceRegistry.resolveByPath`, falling back to `stat`). When the argument is not a directory, it is matched by name against `workspaceRegistry.list()` titles/paths and the listed Sessions' `cwd` values — separators, case, and padding punctuation are normalized, so a spoken name lands on the directory the sidebar shows. The directory is then registered as a Workspace (`workspaceRegistry.create`) and the Session is created from that `workspaceId`. A Session created with a bare `cwd` belongs to no Workspace and stays out of every grouped list. An omitted `cwd` inherits the calling Session's directory; a title is applied through `sessionTitle.rename` on a best-effort basis. The first message is mandatory and travels the same handoff path as `session_send`, so the new Session always owns an event and therefore a sidebar row. An optional `provider`/`model`/`reasoningEffort` route is validated against `sessionController.modelCatalog()` before the Session exists (a miss costs nothing and lists the catalog), then recorded through `agent.model.select()` before the first message is delivered — it appends only that Session's `model/selection` event and never touches the Host-wide default model. An optional `agentPreset` resolves against the `agentPresets` roster the same way: the exact id wins, then a normalized name match (exact, then substring) against usable presets' display names, with candidates on ambiguity and the whole roster on a miss; a deployment without a roster refuses a named preset rather than dropping it silently.
+- **Creating a Session** resolves `cwd` to an existing directory first (using filesystem `stat`). When the argument is not a directory, it is matched by name against `workspaceRegistry.list()` titles/paths and the listed Sessions' `cwd` values — separators, case, and padding punctuation are normalized, so a spoken name lands on the directory the sidebar shows. The directory is then registered as a Workspace (`workspaceRegistry.create`) and the Session is created from that `workspaceId`. A Session created with a bare `cwd` belongs to no Workspace and stays out of every grouped list. An omitted `cwd` inherits the calling Session's directory; a title is applied through `sessionTitle.rename` on a best-effort basis. The first message is mandatory and travels the same handoff path as `session_send`, but an unknown admission may leave the new Session without a sidebar row. An optional `provider`/`model`/`reasoningEffort` route is validated against `sessionController.modelCatalog()` before the Session exists (a miss costs nothing and lists the catalog), then recorded through `agent.model.select()` before the first message is delivered — it appends only that Session's `model/selection` event and never touches the Host-wide default model. An optional `agentPreset` resolves against the `agentPresets` roster the same way: the exact id wins, then a normalized name match (exact, then substring) against usable presets' display names, with candidates on ambiguity and the whole roster on a miss; a deployment without a roster refuses a named preset rather than dropping it silently.
 - **Reading a Session** uses `sessionQuery.readSurface(id)` and projects only `text` blocks of `user/message` and `assistant/message` rows. Reasoning, images, files, tool calls, and tool results never enter the result; each message body is capped at 4000 characters.
 - **The chip** is a `ReferenceInsert` with `appearance: 'session'`. Its serialization is owned by a trigger source this plugin registers (`codec.serialize`), which emits the bracket marker. When the editor refuses chips, the same marker is appended as plain text after the existing draft.
 
@@ -109,7 +106,7 @@ pnpm install
 pnpm run typecheck        # tsc --noEmit
 pnpm run build:all        # tsc -> lib/, then tsdown -> lib/client.js
 pnpm run check:decisions  # decision-record validation
-pnpm test                 # node tests/smoke.mjs against lib/
+pnpm test                 # Verify the built Host and Client entries in lib/
 ```
 
 `lib/` is build output and never committed; `prepublishOnly` runs typecheck, decision-record validation, build, and tests before every publish.

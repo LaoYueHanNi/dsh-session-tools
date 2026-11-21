@@ -10,7 +10,7 @@ DeepSeek Harness 的本地插件：给模型**六个跨会话消息**，并在 `
 - `session_send` — 向指定会话投递一条消息；单向投递，**发出即结束**，`reply: true` 时让对方把结果发回来
 - `session_read` — 仅在用户明确要求时，读取某个会话最近的用户 / 助手消息
 - `session_create` — 新建会话（可指定目录 / 标题 / Agent 预设 / 模型路由），并附一条首消息
-- **「会话消息」**（`/` 菜单，带图标）— 选一个会话，输入框里插入一个**会话 chip**（和 `@` 引用同款样式）；你接着写的是**给模型的指令**，chip 在提交时序列化成 `[目标会话：<标题>]`，模型据此组织内容并调用 `session_send`
+- **「会话消息」**（`/` 菜单，带图标）— 选一个会话，输入框里插入一个**会话 chip**（和 `@` 引用同款样式）；你接着写的是**给模型的指令**，chip 在提交时序列化成 `[目标会话：<sessionId>]`，模型据此组织内容并调用 `session_send`
 
 没有"原样直发"的命令行通道：要一字不改地发，直接去那个会话里说就行。
 
@@ -61,10 +61,7 @@ dsh plugin --profile <name> add @laoyuehanni/dsh-session-tools
 
 接收方用 `session_send` 发回即可，回信像普通消息一样进入发起方会话。两边都不需要读对方、也不需要轮询。
 
-两条投递路径，自动选择：
-
-- **热会话** — 已加载的 Agent 通过收件箱收到消息，`source.kind = 'session-handoff'`，Web 端据此在消息上方标注"收到消息，来自 …"。用 `ctx.sessions.flush` 确认落盘后才返回。
-- **冷会话** — 没有 Agent 可寻址，退回 `ctx.sessionController.prompt`（普通 `user` source）。消息照样送达并唤醒会话，只是没有来源徽标。
+热会话和冷会话均通过宿主 `prompt` 准入，使用稳定请求 ID。`accepted` 表示宿主接受，`persisted: true` 表示宿主还确认了落盘检查点。结果为 `unknown` 时，用返回的 `requestId` 和相同目标、正文重试。首投结果未知时复用已返回的会话 ID。创建返回 `setup_failed` 时，先解决报告的配置问题，再提交首条消息。宿主可从已记录的事件恢复请求 ID，崩溃后的去重取决于事件是否已落盘。消息以普通用户来源投递，正文包含发起方身份。
 
 ## 「会话消息」用法
 
@@ -72,7 +69,7 @@ dsh plugin --profile <name> add @laoyuehanni/dsh-session-tools
 2. 在列表里选一个会话（可搜索；每行显示目录尾段和相对活跃时间）。
 3. 会话 chip 插入在**光标处，不覆盖**你已经输入的任何文字。
 4. 接着写你的指令，例如"把接口变更同步给它，要它重新生成文档"。
-5. 提交时 chip 变成 `[目标会话：<标题>]`；模型读到这个标记，组织真正的正文并调用 `session_send`。
+5. 提交时 chip 变成 `[目标会话：<sessionId>]`；模型读到这个标记，组织真正的正文并调用 `session_send`。
 
 这个标记**刻意不是** `@[label](dsh-session:…)`：那个 URI 会让内置的 `session-reference` 插件注入目标会话的只读快照。方括号标记只是普通上下文，不会在背后读取任何会话内容。
 
@@ -86,13 +83,13 @@ dsh plugin --profile <name> add @laoyuehanni/dsh-session-tools
 
 ## 配置
 
-无。插件只注册六个工具和两个浏览器贡献，不读取任何配置。
+无。六个工具和浏览器功能随插件加载。
 
 ## 实现要点
 
 - **标题** 来自会话投影（`sessionProjections`，冷会话用可选的 `sessionProjectionCache`），不折叠日志，避免列表调用变慢。
 - **归档 / 子代理判断** 读取 `workspaceRegistry.archivedSessionIds` 与会话头的 `origin`。
-- **新建会话**：先把 `cwd` 解析成真实存在的目录（优先 `workspaceRegistry.resolveByPath`，退回 `stat`）。参数不是目录时，按名字与 `workspaceRegistry.list()` 的标题/路径、以及可见会话的 `cwd` 匹配——分隔符、大小写与前后空格/下划线/连字符都归一化，所以口语名会落到侧边栏显示的那个目录。随后把目录注册成 Workspace（`workspaceRegistry.create`），再用 `workspaceId` 建会话——只传 `cwd` 建出来的会话不属于任何 Workspace，不会出现在侧边栏。省略 `cwd` 时继承调用方会话的目录；标题在 Agent 已加载时通过 `sessionTitle.rename` 设置，失败不视为错误。首消息是必填的，并走与 `session_send` 相同的交接路径，因此新会话必定拥有事件、也就必定拥有侧边栏行。可选的 `provider` / `model` / `reasoningEffort` 路由先对照 `sessionController.modelCatalog()` 校验（会话尚未创建，miss 零成本并附上完整目录），再在首条消息投递前经 `agent.model.select()` 写入——只给该会话追加一条 `model/selection` 事件，绝不触碰全局默认模型。可选的 `agentPreset` 同样在创建前对照 `agentPresets` 名册解析：精确 id 优先，其次对可用预设的显示名做归一化匹配（先精确、后包含），歧义列候选、miss 附全名册；无名册的部署指名预设会被拒绝而非静默丢弃。
+- **新建会话**：先把 `cwd` 解析成真实存在的目录（使用文件系统 `stat`）。参数不是目录时，按名字与 `workspaceRegistry.list()` 的标题/路径、以及可见会话的 `cwd` 匹配——分隔符、大小写与前后空格/下划线/连字符都归一化，所以口语名会落到侧边栏显示的那个目录。随后把目录注册成 Workspace（`workspaceRegistry.create`），再用 `workspaceId` 建会话——只传 `cwd` 建出来的会话不属于任何 Workspace，不会出现在侧边栏。省略 `cwd` 时继承调用方会话的目录；标题在 Agent 已加载时通过 `sessionTitle.rename` 设置，失败不视为错误。首消息是必填的，并走与 `session_send` 相同的交接路径，但准入结果未知时新会话可能暂时没有侧边栏行。可选的 `provider` / `model` / `reasoningEffort` 路由先对照 `sessionController.modelCatalog()` 校验（会话尚未创建，miss 零成本并附上完整目录），再在首条消息投递前经 `agent.model.select()` 写入——只给该会话追加一条 `model/selection` 事件，绝不触碰全局默认模型。可选的 `agentPreset` 同样在创建前对照 `agentPresets` 名册解析：精确 id 优先，其次对可用预设的显示名做归一化匹配（先精确、后包含），歧义列候选、miss 附全名册；无名册的部署指名预设会被拒绝而非静默丢弃。
 - **读取会话**：`sessionQuery.readSurface(id)` 返回目标会话当前模型面，插件从中只投影 `user/message` 与 `assistant/message` 的 `text` 块——推理、图片、文件、工具调用与工具结果都不进结果。单条正文上限 4000 字，超出截断加省略号。
 - **会话 chip** 是一个 `appearance: 'session'` 的 `ReferenceInsert`。它的序列化由插件自己注册的 trigger source（`codec.serialize`）负责，产出方括号标记。编辑器拒绝 chip 时，回退为把同样的标记以纯文本追加到已有草稿之后。
 
@@ -109,7 +106,7 @@ pnpm install
 pnpm run typecheck        # tsc --noEmit
 pnpm run build:all        # tsc -> lib/，再用 tsdown -> lib/client.js
 pnpm run check:decisions  # 决策记录校验
-pnpm test                 # node tests/smoke.mjs，跑的是 lib/ 产物
+pnpm test                 # 验证 lib/ 的 Host 和 Client 产物
 ```
 
 `lib/` 是构建产物，不入库；`prepublishOnly` 在每次发布前跑类型检查、决策记录校验、构建和测试。

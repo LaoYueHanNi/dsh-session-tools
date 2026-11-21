@@ -12,7 +12,7 @@ Host 侧其实有两条写模型的路径，但各有取舍：官方的 `session
 
 `session_create` 增加可选三参 `provider` / `model` / `reasoningEffort`，口语名（"glm5.3"、"qwen-dsv4.1"）到精确 id 的解析交给调用模型，插件不做名称匹配。执行顺序：
 
-1. **目录校验前置**：创建任何东西之前，用 `sessionController.modelCatalog()` 校验 `provider/model` 存在、`reasoningEffort`（给了时）属于该模型支持档位。miss 直接报错并附上完整目录（含全局默认），模型一次重试即可命中——失败分文未花，不留半成品。目录与 GUI 模型选择器同源，`groups` 已排除无可用模型的 provider，命中即可路由。目录渲染为逐条 `provider=<id> model=<id>` 键值行而不是 `provider/model` 拼接：model id 自身可含斜杠（实测 `magpie-anthropic` 下的 `remote-magpie/minimax-cn/MiniMax-M3.1-Flash`），拼接后调用方无法唯一拆分。
+1. **目录校验前置**：创建任何东西之前，用 `sessionController.modelCatalog()` 校验 `provider/model` 存在、`reasoningEffort`（显式指定或补全后）属于该模型支持档位；模型没有档位时显式档位会在创建前失败。miss 直接报错并附上完整目录（含全局默认），模型一次重试即可命中——失败分文未花，不留半成品。目录与 GUI 模型选择器同源，`groups` 已排除无可用模型的 provider，命中即可路由。目录渲染为逐条 `provider=<id> model=<id>` 键值行而不是 `provider/model` 拼接：model id 自身可含斜杠（实测 `magpie-anthropic` 下的 `remote-magpie/minimax-cn/MiniMax-M3.1-Flash`），拼接后调用方无法唯一拆分。
 2. **选择写入在创建之后、首条消息投递之前**：`ctx.agents.get(sessionId).model.select(...)` 追加 `model/selection` 事件，新会话的第一个模型回合就跑在指定路由上。省略 `reasoningEffort` 时按已知信息补全：DSH 不按模型记忆档位，全局只有一份 `agentDefaultModel.currentSelection()`（用户最后一次 GUI 手动切换的 provider/model/effort 三元组）——当它的路由与请求一致时，其 effort 就是「用户上次在这个模型上手选的档位」，直接沿用；否则用目录里该模型 `reasoning.defaultEffort`（provider 推荐档）；两者皆无则保持省略，首个请求跟随 adapter 默认。
 3. **刻意不走 `sessionController.selectModel`**：一句「用 X 建会话」不该顺手改掉用户的全局默认模型——那是用户在 GUI 里的显式动作才该有的效果。
 

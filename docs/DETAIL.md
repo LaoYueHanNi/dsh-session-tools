@@ -22,3 +22,5 @@ Delivery is **one-way**: the message enters the other Session like an ordinary u
 - An archived Session must be restored in the client before it can receive messages, but it can still be read.
 - A directory you name must have appeared in this machine's sidebar; for a path that never has, give the absolute path directly.
 - You never need to remember tool names or parameters — just speak the way the examples above do.
+
+A receipt confirms admission, not task completion; `persisted: true` additionally confirms a durability checkpoint, and anything else may not be on disk yet. If admission is unknown, retain the returned request ID and Session ID when retrying the same handoff.
