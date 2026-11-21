@@ -12,7 +12,7 @@ No more copy-pasting between Sessions: say what needs to be passed on and the mo
 
 Delivery is **one-way**: the message enters the other Session like an ordinary user message, waking it or joining in, and your side's job is done.
 
-- When you need the result, say so; the reply arrives in your Session like any other message.
+- When you need the result, say so. In Web chat, incoming handoffs and replies show the sending Session and a short preview. Select the card to read the full message. Steered messages use the Host’s standard display.
 - When the other side is busy, just say whether it should "wait until you're done" or "cut in right now".
 - When a name is ambiguous, the model lists the candidates and asks you to confirm instead of guessing.
 

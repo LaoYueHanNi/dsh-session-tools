@@ -10,6 +10,7 @@ A dsh plugin that gives the model **six cross-Session tools** and gives you a **
 - `session_send` — hand one message to that Session; one-way delivery, **sending ends your part**, `reply: true` asks it to send the result back
 - `session_read` — read a Session's recent user / assistant messages, only when you explicitly ask to see them
 - `session_create` — create a Session (directory / title / Agent preset / optional model route) and hand it a first message
+- **Handoff cards** — successful sends and creations show a clickable receipt below the answer. In Web chat, incoming handoffs show the sending Session and a short preview. Select the card to read the full message.
 - **Session message** (`/` menu, with icon) — pick a Session and a **Session chip** (same rendering as an `@` reference) is inserted into the composer. What you type next is an **instruction for the model**: the chip serializes to `[Target session: <sessionId>]` on submit (`[目标会话：<sessionId>]` on a Chinese interface), and the model composes the real message and calls `session_send`
 
 There is deliberately **no verbatim-delivery command**: to send text unchanged, just say it in that Session yourself.

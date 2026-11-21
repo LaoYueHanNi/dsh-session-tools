@@ -3,10 +3,12 @@
  *
  * Browser contributions:
  *
- * A `/` command row (Session message / 会话消息): opening it lists Sessions, and picking one
- * fills a target MARKER into the composer. Whatever the user types after the
- * marker is an instruction for the model, which then composes the message and
- * calls `session_send` — there is no direct-delivery command path on purpose.
+ * 1. A disclosure for an incoming Session message, plus the legacy source badge.
+ * 2. A `/` command row (Session message / 会话消息): opening it lists Sessions, and picking one
+ *    fills a target MARKER into the composer. Whatever the user types after the
+ *    marker is an instruction for the model, which then composes the message and
+ *    calls `session_send` — there is no direct-delivery command path on purpose.
+ * 3. A clickable handoff receipt after the turn that sent a message or created a Session.
  *
  * The picker uses the shared `popupSelect` shell instead of a self-rendered
  * overlay: the shell owns its anchoring, surface material, search field, and
@@ -23,6 +25,8 @@
 
 import React from 'react'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { SessionId } from '@deepseek-ai/dsh-session'
+import { IncomingHandoff, isHandoffRequest, mountIncomingHandoffStyle, registerHandoffCards, SessionName } from './handoff-cards.tsx'
 
 /**
  * The narrow service surface this bundle touches, declared structurally so the
@@ -102,6 +106,17 @@ const h = React.createElement as (
   ...children: unknown[]
 ) => unknown
 
+const BADGE_STYLE = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '4px',
+  margin: '2px 0 6px',
+  padding: '0',
+  fontSize: '12px',
+  lineHeight: '18px',
+  color: 'var(--dsw-color-text-tertiary, #8b8f98)',
+}
+
 /** Longest title a picker row carries before it is cut for display. */
 const MAX_ROW_TITLE = 80
 
@@ -121,6 +136,18 @@ const STRINGS = {
     'search.noResults': 'No matching Sessions',
     'untitled': 'Untitled Session',
     'marker.wrap': 'Target session: {}',
+    'badge.prefix': 'Message from',
+    'handoff.incoming': 'Received a session message',
+    'handoff.from.lead': 'Received from',
+    'handoff.created': 'Session created',
+    'handoff.createdBy.lead': 'Created by',
+    'handoff.createdBy.trail': '',
+    'handoff.to.lead': 'Sent to',
+    'card.session': 'Session',
+    'card.newSession': 'New Session',
+    'card.accepted': 'Message accepted',
+    'card.created': 'Session created · First message accepted',
+    'card.open': 'Open {name}',
     'notice.prefix': 'Session message: {}',
     'time.now': 'now',
   },
@@ -132,10 +159,28 @@ const STRINGS = {
     'search.noResults': '没有匹配的会话',
     'untitled': '未命名会话',
     'marker.wrap': '目标会话：{}',
+    'badge.prefix': '收到消息，来自',
+    'handoff.incoming': '收到会话消息',
+    'handoff.from.lead': '接收自',
+    'handoff.created': '会话已创建',
+    'handoff.createdBy.lead': '由',
+    'handoff.createdBy.trail': '创建',
+    'handoff.to.lead': '发送到',
+    'card.session': '目标会话',
+    'card.newSession': '新会话',
+    'card.accepted': '投递已受理',
+    'card.created': '会话已创建 · 首条消息已受理',
+    'card.open': '打开 {name}',
     'notice.prefix': '会话消息：{}',
     'time.now': '刚刚',
   },
 } as const
+
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap {
+    'session-tools-client': keyof typeof STRINGS.en
+  }
+}
 
 /** Placeholder every template string carries; replaced with its one argument. */
 const SLOT = '{}'
@@ -227,6 +272,56 @@ function SessionToolIcon(props: Record<string, unknown>): unknown {
     },
     h('path', { d: 'M2.5 3h7.5a1 1 0 0 1 1 1v4.2a1 1 0 0 1-1 1H6.2L3.5 11.6V9.2h-1a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z' }),
     h('path', { d: 'M12.9 7.4h.6a1 1 0 0 1 1 1v3.1a1 1 0 0 1-1 1h-.6v1.7l-2-1.7' }),
+  )
+}
+
+/** The handoff source a row carries, or null for every other row. */
+interface HandoffSource {
+  readonly kind: 'session-handoff'
+  readonly senderSessionId?: unknown
+  readonly senderTitle?: unknown
+}
+
+/**
+ * Recognize this plugin's handoffs from the host's recorded source.
+ * @param owner - durable message source and row kind.
+ * @returns the presentation variant, or null for other rows.
+ */
+function selectHandoff(owner: unknown): HandoffSource | { readonly kind: 'prompt-handoff'; readonly rpcId: string } | null {
+  const source = owner !== null && typeof owner === 'object'
+    ? (owner as { source?: unknown; kind?: unknown })
+    : undefined
+  const metadata = source?.source
+  if (metadata === null || typeof metadata !== 'object') return null
+  const { kind, rpcId } = metadata as { kind?: unknown; rpcId?: unknown }
+  if (kind === 'session-handoff') return metadata as HandoffSource
+  if (source?.kind === 'user' && kind === 'user' && isHandoffRequest(rpcId)) return { kind: 'prompt-handoff', rpcId }
+  return null
+}
+
+/**
+ * Source decoration for an incoming handoff.
+ * @param props - matched handoff source.
+ * @returns the disclosure or historical sender line.
+ */
+function HandoffBadge(props: {
+  readonly matched: NonNullable<ReturnType<typeof selectHandoff>>
+  readonly chat: React.ComponentProps<typeof IncomingHandoff>['chat']
+  readonly t: React.ComponentProps<typeof IncomingHandoff>['t']
+}): unknown {
+  const source = props.matched
+  if (source.kind === 'prompt-handoff') {
+    return React.createElement(IncomingHandoff, { rpcId: source.rpcId, chat: props.chat, t: props.t })
+  }
+  const title = typeof source.senderTitle === 'string' && source.senderTitle !== ''
+    ? source.senderTitle
+    : typeof source.senderSessionId === 'string' ? source.senderSessionId : ''
+  if (title === '') return null
+  return h(
+    'div',
+    { style: BADGE_STYLE, 'data-session-handoff': source.senderSessionId ?? '' },
+    h('span', null, props.t('badge.prefix')),
+    React.createElement(SessionName, { name: title }),
   )
 }
 
@@ -406,6 +501,7 @@ export const inject = ['slots', 'commandUi', 'sessions', 'conversation', 'remote
  * @param ctx - client root context.
  */
 export function apply(ctx: Scope): void {
+  registerHandoffCards(ctx, NS)
   // Register this bundle's copy under its own namespace and rebind the module
   // translator, so every visible string follows the interface language. The
   // bound function resolves on each call, so a language switch is picked up
@@ -432,6 +528,18 @@ export function apply(ctx: Scope): void {
       return unregister
     }, 'session-tools-client: locale dictionaries')
   })
+
+  ctx.inject(['uiConversation'], scope => {
+    const typed = scope as Scope
+    return typed.slots.inject('conversation.chat.user.before', () => typed.slots.register({
+      name: 'conversation.chat.user.before',
+      locale: NS,
+      select: selectHandoff,
+      inject: (sessionId: SessionId) => ({ chat: scope.uiConversation.binding(sessionId).target('chat') }),
+    }, HandoffBadge))
+  })
+
+  if (typeof document !== 'undefined') ctx.effect?.(mountIncomingHandoffStyle, 'session-tools-client: incoming handoff styles')
 
   // The chip's serializer has to be routable by source name; registering a
   // candidate-less source is the supported way to own one.

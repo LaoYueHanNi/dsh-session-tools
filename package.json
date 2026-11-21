@@ -75,7 +75,7 @@
     "watch:client": "tsdown --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check:decisions": "node docs/decisions/check.mjs",
-    "test": "node tests/smoke.mjs && node tests/host-contracts.mjs && node tests/candidate-picker.mjs",
+    "test": "node tests/smoke.mjs && node tests/host-contracts.mjs && node tests/handoff-cards.mjs",
     "prepublishOnly": "pnpm run typecheck && pnpm run check:decisions && pnpm run build:all && pnpm test"
   },
   "engines": {
