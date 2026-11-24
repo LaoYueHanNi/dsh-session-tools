@@ -2,6 +2,7 @@
   "name": "@laoyuehanni/dsh-session-tools",
   "version": "0.1.1",
   "description": "DSH plugin: list visible Sessions, hand one message to another Session, and move separate work into a new Session",
+  "icon": "./icon.svg",
   "keywords": [
     "dsh",
     "deepseek",
@@ -75,7 +76,7 @@
     "watch:client": "tsdown --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check:decisions": "node docs/decisions/check.mjs",
-    "test": "node tests/smoke.mjs && node tests/host-contracts.mjs && node tests/handoff-cards.mjs",
+    "test": "node tests/smoke.mjs && node tests/host-contracts.mjs && node tests/handoff-cards.mjs && node tests/plugin-icon.mjs",
     "prepublishOnly": "pnpm run typecheck && pnpm run check:decisions && pnpm run build:all && pnpm test"
   },
   "engines": {

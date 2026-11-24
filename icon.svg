@@ -1,7 +1,16 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
-  <rect x="2" y="3" width="12" height="8" rx="2.5" stroke="#6B8AFD" stroke-width="1.6"/>
-  <path d="M5.5 11v3.2L9 11" fill="#6B8AFD"/>
-  <rect x="10" y="10" width="12" height="8" rx="2.5" fill="#1F2937"/>
-  <path d="M18.5 18v3.2L15 18" fill="#1F2937"/>
-  <path d="M12.8 13.2h6.4M12.8 15.6h4.2" stroke="#F8FAFC" stroke-width="1.4" stroke-linecap="round"/>
+<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M10.1 8.2H19.4C20.836 8.2 22 9.364 22 10.8V15.6C22 17.036 20.836 18.2 19.4 18.2H13.4L10.4 20.8Q10.1 21.06 10.1 20.66V18.2C8.664 18.2 7.5 17.036 7.5 15.6V10.8C7.5 9.364 8.664 8.2 10.1 8.2Z" fill="url(#dsh_session_tools_src)" fill-opacity="0.88" />
+  <path d="M11.2 12.1H18.2M11.2 14.5H15.4" stroke="#FFFFFF" stroke-opacity="0.88" stroke-width="1.5" stroke-linecap="round" />
+  <path d="M16.6 15.4H25.9C27.336 15.4 28.5 16.564 28.5 18V22.8C28.5 24.236 27.336 25.4 25.9 25.4V27.86Q25.9 28.26 25.6 28.0L22.6 25.4H16.6C15.164 25.4 14 24.236 14 22.8V18C14 16.564 15.164 15.4 16.6 15.4Z" fill="url(#dsh_session_tools_dst)" fill-opacity="0.92" />
+  <path d="M18.2 20.4H24.1M21.85 18.15L24.1 20.4L21.85 22.65" stroke="#FFFFFF" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" />
+  <defs>
+    <linearGradient id="dsh_session_tools_src" x1="14.75" y1="8.2" x2="14.75" y2="20.8" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7AC2FF" />
+      <stop offset="1" stop-color="#4A65E8" />
+    </linearGradient>
+    <linearGradient id="dsh_session_tools_dst" x1="21.25" y1="15.4" x2="21.25" y2="28" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4AE5AC" />
+      <stop offset="1" stop-color="#098E9A" />
+    </linearGradient>
+  </defs>
 </svg>
